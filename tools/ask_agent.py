@@ -17,6 +17,7 @@ Loaded via the app's external-tools mechanism:
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 import httpx
@@ -28,6 +29,20 @@ logger = logging.getLogger(__name__)
 TRUEFORGE_URL = os.getenv("TRUEFORGE_BASE_URL", "http://localhost:8790").rstrip("/")
 DEFAULT_AGENT = os.getenv("TRUEFORGE_DEFAULT_AGENT", "")
 
+# Every delegation lands in ONE TrueForge session, so the UI shows a single
+# continuous thread of what the robot asked for — with each tool call, its
+# arguments, and its result rendered by the agent-steps panel. A new session per
+# call would scatter that across dozens of one-turn threads.
+#
+# Reusing the session also chains turns (previous_turn_id defaults to "auto"),
+# so the agent remembers earlier delegations in the same conversation.
+SESSION_FILE = Path(
+    os.getenv(
+        "TRUEFORGE_SESSION_FILE",
+        Path(__file__).resolve().parent.parent / ".run" / "trueforge_session",
+    )
+)
+
 # Spoken conversation cannot tolerate a long silence, so cap the wait and return
 # a partial status rather than leaving the user staring at a mute robot.
 TURN_TIMEOUT = float(os.getenv("TRUEFORGE_TURN_TIMEOUT", "45"))
@@ -38,6 +53,45 @@ def _token_headers() -> Dict[str, str]:
     """Bearer header only when the server has OIDC login on; local mode needs none."""
     token = os.getenv("TRUEFORGE_TOKEN", "").strip()
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+async def _resolve_session(
+    client: httpx.AsyncClient, headers: Dict[str, str], agent_name: str
+) -> str:
+    """Return the shared session id, reusing the stored one when it still exists.
+
+    The server is the source of truth: a stored id is verified before reuse, so a
+    restarted TrueForge (or a deleted session) transparently gets a fresh one
+    instead of failing every delegation.
+    """
+    stored = ""
+    try:
+        stored = SESSION_FILE.read_text().strip()
+    except OSError:
+        pass
+
+    if stored:
+        r = await client.get(f"{TRUEFORGE_URL}/api/v1/sessions/{stored}", headers=headers)
+        if r.status_code == 200:
+            return stored
+        logger.info("Stored TrueForge session %s is gone; opening a new one.", stored)
+
+    r = await client.post(
+        f"{TRUEFORGE_URL}/api/v1/sessions",
+        headers=headers,
+        json={"agent": {"name": agent_name}},
+    )
+    r.raise_for_status()
+    session_id = r.json()["data"]["id"]
+
+    try:
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SESSION_FILE.write_text(session_id)
+    except OSError as e:
+        logger.warning("Could not persist TrueForge session id: %s", e)
+
+    logger.info("Opened TrueForge session %s — view it at %s", session_id, TRUEFORGE_URL)
+    return session_id
 
 
 class AskAgent(Tool):
@@ -62,6 +116,16 @@ class AskAgent(Tool):
                     "The full task for the agent, phrased as you would to a capable "
                     "colleague. Include any specifics the user gave — URLs, repo names, "
                     "constraints — since the agent cannot hear the conversation."
+                ),
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Optional. What the user said in their own words, plus any relevant "
+                    "background from the conversation so far. The agent cannot hear the "
+                    "conversation, so this is the only way it learns what led to the "
+                    "request — and it is what shows up in the TrueForge UI, making the "
+                    "delegation readable later. Two or three sentences is plenty."
                 ),
             },
             "agent": {
@@ -93,20 +157,24 @@ class AskAgent(Tool):
         logger.info("Tool call: ask_agent agent=%r question=%r", agent_name, question[:120])
         headers = {"Content-Type": "application/json", **_token_headers()}
 
+        # Spoken context first, so the TrueForge thread reads as a conversation
+        # rather than a bare instruction with no provenance.
+        context = kwargs.get("context")
+        message = question
+        if isinstance(context, str) and context.strip():
+            message = f"Spoken context: {context.strip()}\n\nTask: {question}"
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                r = await client.post(
-                    f"{TRUEFORGE_URL}/api/v1/sessions",
-                    headers=headers,
-                    json={"agent": {"name": agent_name}},
-                )
-                if r.status_code == 404:
-                    return {
-                        "error": "agent_not_found",
-                        "spoken": f"There's no TrueForge agent called {agent_name}.",
-                    }
-                r.raise_for_status()
-                session_id = r.json()["data"]["id"]
+                try:
+                    session_id = await _resolve_session(client, headers, agent_name)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        return {
+                            "error": "agent_not_found",
+                            "spoken": f"There's no TrueForge agent called {agent_name}.",
+                        }
+                    raise
 
                 # stream=false: take the turn id now and poll. The SSE stream is
                 # richer, but a voice turn only needs the final text, and polling
@@ -115,7 +183,7 @@ class AskAgent(Tool):
                     f"{TRUEFORGE_URL}/api/v1/sessions/{session_id}/turns",
                     headers=headers,
                     json={
-                        "input": [{"type": "user.message", "content": question}],
+                        "input": [{"type": "user.message", "content": message}],
                         "stream": False,
                     },
                 )
