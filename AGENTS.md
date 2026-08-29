@@ -164,9 +164,32 @@ not name**.
   Clear it in the control panel.
 - **`ask_agent` caps at 45s.** A deep crawl returns "still working", not an answer.
   That is the timeout, not a broken integration.
+- **Editing anything in `tools/` needs an app restart.** Python caches imported
+  modules, so a running app silently keeps using the old code — the edit looks
+  like it did nothing.
 - **The app's API prefix moved between releases** — v0.8.0 serves
   `/personalities` at the root, v0.10.0 used `/api/v1`. `bin/control-panel` probes
   for it.
+
+## TrueForge sessions
+
+Every `ask_agent` delegation lands in **one shared session**, so the UI shows a
+single readable thread with each tool call, its arguments and its result — rather
+than a new sidebar row per question. Turns chain, so the agent remembers earlier
+delegations. The id lives in `.run/trueforge_session` (gitignored); delete it to
+start a fresh thread.
+
+That thread is rotated rather than grown forever, since chained turns make context
+(and cost) creep up, and TrueForge's compaction would eventually spend a model call
+summarizing it:
+
+| Variable | Default | Trigger |
+|---|---|---|
+| `TRUEFORGE_SESSION_TTL_HOURS` | `12` | Session older than this |
+| `TRUEFORGE_SESSION_MAX_TURNS` | `40` | Backstop for a very busy day |
+
+Rotation is checked before each delegation, and a session that no longer exists
+server-side (TrueForge restarted, thread deleted) transparently opens a new one.
 
 ## Costs
 

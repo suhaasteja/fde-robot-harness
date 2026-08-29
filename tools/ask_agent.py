@@ -17,6 +17,7 @@ Loaded via the app's external-tools mechanism:
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -43,6 +44,17 @@ SESSION_FILE = Path(
     )
 )
 
+# ...but not forever. Turns chain, so the thread's context grows with every
+# delegation. Left unbounded it eventually trips TrueForge's compaction, which
+# spends a model call to summarize and quietly loses detail, and the sidebar row
+# becomes an unnavigable wall titled after whatever was asked first.
+#
+# Rotating keeps each thread cheap to run and readable after the fact. Age is the
+# primary trigger (a working session is a natural unit); the turn cap is a
+# backstop for a very busy day.
+SESSION_TTL_HOURS = float(os.getenv("TRUEFORGE_SESSION_TTL_HOURS", "12"))
+SESSION_MAX_TURNS = int(os.getenv("TRUEFORGE_SESSION_MAX_TURNS", "40"))
+
 # Spoken conversation cannot tolerate a long silence, so cap the wait and return
 # a partial status rather than leaving the user staring at a mute robot.
 TURN_TIMEOUT = float(os.getenv("TRUEFORGE_TURN_TIMEOUT", "45"))
@@ -55,10 +67,34 @@ def _token_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+async def _should_rotate(
+    client: httpx.AsyncClient, headers: Dict[str, str], session: dict
+) -> str:
+    """Return a reason to rotate, or "" to keep using this session."""
+    created = str(session.get("created_at", ""))
+    if created:
+        try:
+            started = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            age_h = (datetime.now(timezone.utc) - started).total_seconds() / 3600
+            if age_h >= SESSION_TTL_HOURS:
+                return f"age {age_h:.1f}h >= {SESSION_TTL_HOURS}h"
+        except ValueError:
+            pass  # unparseable timestamp is not a reason to throw the session away
+
+    r = await client.get(
+        f"{TRUEFORGE_URL}/api/v1/sessions/{session['id']}/turns", headers=headers
+    )
+    if r.status_code == 200:
+        n = len(r.json().get("data", []))
+        if n >= SESSION_MAX_TURNS:
+            return f"{n} turns >= {SESSION_MAX_TURNS}"
+    return ""
+
+
 async def _resolve_session(
     client: httpx.AsyncClient, headers: Dict[str, str], agent_name: str
 ) -> str:
-    """Return the shared session id, reusing the stored one when it still exists.
+    """Return the shared session id, rotating it when it gets old or long.
 
     The server is the source of truth: a stored id is verified before reuse, so a
     restarted TrueForge (or a deleted session) transparently gets a fresh one
@@ -73,8 +109,12 @@ async def _resolve_session(
     if stored:
         r = await client.get(f"{TRUEFORGE_URL}/api/v1/sessions/{stored}", headers=headers)
         if r.status_code == 200:
-            return stored
-        logger.info("Stored TrueForge session %s is gone; opening a new one.", stored)
+            reason = await _should_rotate(client, headers, r.json()["data"])
+            if not reason:
+                return stored
+            logger.info("Rotating TrueForge session %s (%s).", stored, reason)
+        else:
+            logger.info("Stored TrueForge session %s is gone; opening a new one.", stored)
 
     r = await client.post(
         f"{TRUEFORGE_URL}/api/v1/sessions",
