@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""
+control-panel — one web UI for the Reachy Mini conversation app.
+
+The pieces you want live in three different places, so this stitches them
+together rather than patching the pinned app package:
+
+  volume / mic     -> daemon HTTP API on :8000  (always available)
+  system prompt    -> the app's own API on :7860 (only when started with --ui)
+  transcript       -> parsed out of logs/app.log
+  saved memory     -> ~/.local/share/reachy_mini_conversation_app/memory.v1.json
+
+Stdlib only, so it runs under any python3 without touching the venv.
+
+    bin/control-panel            # serve on http://127.0.0.1:7870
+    bin/control-panel --port N
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+DAEMON = "http://127.0.0.1:8000"
+APP_UI = "http://127.0.0.1:7860"
+
+# The app's routes are under /api/v1 (the daemon's are under /api). Its
+# "no custom profile" sentinel is a literal display string, not "Default".
+DEFAULT_PERSONALITY = "(built-in default)"
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOG_FILE = REPO_ROOT / "logs" / "app.log"
+MEMORY_FILE = Path.home() / ".local/share/reachy_mini_conversation_app/memory.v1.json"
+
+# 2026-08-29 10:30:33,245 INFO ...console:885 | role=assistant content=Hi there
+LOG_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ .*?\| role=(?P<role>\S+) content=(?P<content>.*)$"
+)
+
+
+# --- upstream helpers ------------------------------------------------------
+
+
+def fetch(url: str, method: str = "GET", payload: dict | None = None, timeout: float = 6.0):
+    """Call an upstream JSON API. Returns (ok, data)."""
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode()
+            return True, (json.loads(body) if body else {})
+    except urllib.error.HTTPError as e:
+        try:
+            return False, json.loads(e.read().decode())
+        except Exception:
+            return False, {"error": f"HTTP {e.code}"}
+    except Exception as e:
+        return False, {"error": str(e)}
+
+
+def read_transcript(limit: int = 200):
+    """Parse the app log into conversation turns.
+
+    The realtime backend emits user speech as a stream of `user_partial` lines,
+    each holding one fragment. Consecutive fragments are joined back into a
+    single utterance so the panel shows sentences, not word salad.
+    """
+    if not LOG_FILE.exists():
+        return []
+
+    turns: list[dict] = []
+    try:
+        lines = LOG_FILE.read_text(errors="replace").splitlines()
+    except Exception:
+        return []
+
+    for line in lines:
+        m = LOG_RE.match(line)
+        if not m:
+            continue
+        role = m.group("role")
+        content = m.group("content")
+        ts = m.group("ts")
+        speaker = "user" if role.startswith("user") else "assistant"
+        partial = role.endswith("_partial")
+
+        # Each utterance is logged twice: first as a run of `*_partial` lines
+        # carrying incremental fragments, then once as a final non-partial line
+        # holding the recognizer's cleaned-up full text (punctuation fixed, words
+        # revised). The final line is authoritative, so it replaces the
+        # accumulated fragments instead of adding a second turn.
+        open_partial = bool(turns) and turns[-1]["role"] == speaker and turns[-1]["partial"]
+
+        if open_partial and partial:
+            turns[-1]["content"] += content
+            turns[-1]["ts"] = ts
+        elif open_partial and not partial:
+            turns[-1]["content"] = content
+            turns[-1]["partial"] = False
+            turns[-1]["ts"] = ts
+        else:
+            turns.append({"role": speaker, "content": content, "ts": ts, "partial": partial})
+
+    for t in turns:
+        t["content"] = " ".join(t["content"].split())
+    turns = [t for t in turns if t["content"]]
+    return turns[-limit:]
+
+
+def read_memory():
+    if not MEMORY_FILE.exists():
+        return []
+    try:
+        return json.loads(MEMORY_FILE.read_text()).get("facts", [])
+    except Exception:
+        return []
+
+
+def clear_memory():
+    """Empty the saved-facts store, backing it up first."""
+    if not MEMORY_FILE.exists():
+        return {"ok": True, "cleared": 0}
+    try:
+        data = json.loads(MEMORY_FILE.read_text())
+        n = len(data.get("facts", []))
+        MEMORY_FILE.with_suffix(".json.bak").write_text(json.dumps(data, indent=2))
+        data["facts"] = []
+        MEMORY_FILE.write_text(json.dumps(data, indent=2))
+        return {"ok": True, "cleared": n}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def app_ui_up() -> bool:
+    ok, _ = fetch(f"{APP_UI}/api/v1/personalities", timeout=1.5)
+    return ok
+
+
+# --- request handling ------------------------------------------------------
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):  # quiet
+        pass
+
+    def _send(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _html(self):
+        body = PAGE.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+
+        if p == "/":
+            return self._html()
+
+        if p == "/api/state":
+            ok_v, vol = fetch(f"{DAEMON}/api/volume/current")
+            ok_m, mic = fetch(f"{DAEMON}/api/volume/microphone/current")
+            ui = app_ui_up()
+            state = {
+                "daemon": ok_v,
+                "app_ui": ui,
+                "volume": vol.get("volume") if ok_v else None,
+                "mic": mic.get("volume") if ok_m else None,
+                "device": vol.get("device") if ok_v else None,
+                "memory": read_memory(),
+            }
+            if ui:
+                ok_p, pers = fetch(f"{APP_UI}/api/v1/personalities")
+                if ok_p:
+                    state["personalities"] = pers.get("choices", [])
+                    state["current_personality"] = pers.get("current")
+                    state["locked"] = pers.get("locked", False)
+                ok_vc, cur = fetch(f"{APP_UI}/api/v1/voices/current")
+                if ok_vc:
+                    state["voice"] = cur.get("voice") if isinstance(cur, dict) else cur
+                ok_mu, mu = fetch(f"{APP_UI}/api/v1/mic")
+                if ok_mu:
+                    state["muted"] = mu.get("muted", False)
+            return self._send(state)
+
+        if p == "/api/transcript":
+            return self._send({"turns": read_transcript()})
+
+        if p == "/api/prompt":
+            name = DEFAULT_PERSONALITY
+            if "?" in self.path:
+                from urllib.parse import parse_qs, urlparse
+
+                name = parse_qs(urlparse(self.path).query).get("name", [DEFAULT_PERSONALITY])[0]
+            ok, data = fetch(f"{APP_UI}/api/v1/personalities/load?name={urllib.request.quote(name)}")
+            return self._send(data if ok else {"error": data.get("error", "app UI unavailable")},
+                              200 if ok else 502)
+
+        if p == "/api/voices":
+            ok, data = fetch(f"{APP_UI}/api/v1/voices")
+            return self._send({"voices": data if ok else []})
+
+        return self._send({"error": "not found"}, 404)
+
+    def do_POST(self):
+        p = self.path.split("?")[0]
+        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            payload = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            payload = {}
+
+        if p == "/api/volume":
+            ok, data = fetch(f"{DAEMON}/api/volume/set", "POST", {"volume": int(payload.get("volume", 50))})
+            return self._send(data, 200 if ok else 502)
+
+        if p == "/api/mic":
+            ok, data = fetch(f"{DAEMON}/api/volume/microphone/set", "POST",
+                             {"volume": int(payload.get("volume", 50))})
+            return self._send(data, 200 if ok else 502)
+
+        if p == "/api/mute":
+            # App-level mute, distinct from the daemon's mic gain above.
+            ok, data = fetch(f"{APP_UI}/api/v1/mic", "POST", {"muted": bool(payload.get("muted"))})
+            return self._send(data, 200 if ok else 502)
+
+        if p == "/api/test-sound":
+            ok, data = fetch(f"{DAEMON}/api/volume/test-sound", "POST", {})
+            return self._send(data, 200 if ok else 502)
+
+        if p == "/api/memory/clear":
+            return self._send(clear_memory())
+
+        if p == "/api/prompt":
+            # Save under a user profile, then apply it live.
+            name = payload.get("name") or "custom"
+            save = {
+                "name": name,
+                "instructions": payload.get("instructions", ""),
+                "greeting": payload.get("greeting"),
+                "tools_text": payload.get("tools_text", ""),
+                "voice": payload.get("voice"),
+            }
+            ok, data = fetch(f"{APP_UI}/api/v1/personalities/save", "POST", save)
+            if not ok or not data.get("ok"):
+                return self._send({"ok": False, "error": data.get("error", "save failed")}, 502)
+            ok2, applied = fetch(f"{APP_UI}/api/v1/personalities/apply", "POST",
+                                 {"name": data.get("value"), "persist": True})
+            return self._send({"ok": ok2, "value": data.get("value"), "applied": applied})
+
+        return self._send({"error": "not found"}, 404)
+
+
+PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reachy Mini — Control Panel</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif;
+  background:#0f1115;color:#e6e8ee}
+header{padding:16px 22px;border-bottom:1px solid #232735;display:flex;align-items:center;gap:14px;
+  position:sticky;top:0;background:#0f1115;z-index:5}
+h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+.pill{font-size:11px;padding:3px 9px;border-radius:20px;border:1px solid #2c3143;color:#9aa3b8}
+.pill.on{color:#4ade80;border-color:#1f4d33;background:#0e2318}
+.pill.off{color:#f87171;border-color:#4d2020;background:#241010}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:18px;padding:18px 22px;
+  align-items:start}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+section{background:#151823;border:1px solid #232735;border-radius:12px;padding:16px}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.9px;color:#8b93a8;margin:0 0 14px}
+label{display:block;font-size:12px;color:#9aa3b8;margin:14px 0 6px}
+input[type=range]{width:100%;accent-color:#6366f1}
+.row{display:flex;align-items:center;gap:12px}
+.val{font-variant-numeric:tabular-nums;min-width:42px;text-align:right;color:#c7ccda}
+textarea{width:100%;min-height:230px;background:#0d0f16;color:#e6e8ee;border:1px solid #2c3143;
+  border-radius:8px;padding:11px;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+select,input[type=text]{background:#0d0f16;color:#e6e8ee;border:1px solid #2c3143;border-radius:8px;
+  padding:8px 10px;font:13px inherit;width:100%}
+button{background:#6366f1;color:#fff;border:0;border-radius:8px;padding:9px 15px;font:600 13px inherit;
+  cursor:pointer}
+button:hover{background:#7679f3}
+button.ghost{background:#1c2030;color:#c7ccda;border:1px solid #2c3143}
+button.ghost:hover{background:#232838}
+button:disabled{opacity:.45;cursor:not-allowed}
+.actions{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}
+#chat{max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
+.turn{padding:9px 12px;border-radius:10px;max-width:88%;white-space:pre-wrap;word-wrap:break-word}
+.turn.user{background:#1c2030;align-self:flex-end;border:1px solid #2c3143}
+.turn.assistant{background:#16233a;align-self:flex-start;border:1px solid #24365a}
+.who{font-size:10px;text-transform:uppercase;letter-spacing:.7px;opacity:.55;margin-bottom:3px}
+.empty{color:#6b7280;font-style:italic;padding:18px 0;text-align:center}
+.fact{display:flex;justify-content:space-between;gap:10px;padding:7px 10px;background:#0d0f16;
+  border:1px solid #2c3143;border-radius:7px;margin-bottom:6px;font-size:13px}
+.note{font-size:12px;color:#8b93a8;margin-top:10px;line-height:1.5}
+.warn{background:#241a10;border:1px solid #4d3a20;color:#fbbf24;padding:10px 12px;border-radius:8px;
+  font-size:12.5px;margin-bottom:14px}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1c2030;
+  border:1px solid #2c3143;padding:10px 18px;border-radius:9px;opacity:0;transition:opacity .25s;
+  pointer-events:none;font-size:13px}
+#toast.show{opacity:1}
+</style></head><body>
+<header>
+  <h1>Reachy Mini</h1>
+  <span class="pill" id="p-daemon">daemon</span>
+  <span class="pill" id="p-ui">app</span>
+  <span class="pill" id="p-dev"></span>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Audio</h2>
+      <label>Speaker volume</label>
+      <div class="row"><input type="range" id="vol" min="0" max="100"><span class="val" id="vol-v">–</span></div>
+      <label>Microphone</label>
+      <div class="row"><input type="range" id="mic" min="0" max="100"><span class="val" id="mic-v">–</span></div>
+      <div class="actions">
+        <button class="ghost" id="test">Play test sound</button>
+        <button class="ghost" id="mute">Mute mic</button>
+      </div>
+    </section>
+
+    <section style="margin-top:18px">
+      <h2>Saved memory</h2>
+      <div id="facts"></div>
+      <div class="actions"><button class="ghost" id="clearmem">Clear saved facts</button></div>
+      <div class="note">Facts the robot saved about you. These are injected into every
+        session, so a stale name here is what makes it greet you wrongly. Cleared
+        facts are backed up to <code>memory.v1.json.bak</code>.</div>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>System prompt</h2>
+      <div id="ui-warn" class="warn" style="display:none">
+        The app isn't exposing its API. Restart it with the UI enabled:
+        <code>bin/reachy-app restart --ui</code>
+      </div>
+      <label>Base personality</label>
+      <select id="pers"></select>
+      <label>Instructions</label>
+      <textarea id="instr" placeholder="Loading…"></textarea>
+      <label>Save as</label>
+      <input type="text" id="pname" placeholder="custom" value="custom">
+      <div class="actions">
+        <button id="save">Save &amp; apply</button>
+        <button class="ghost" id="reload">Reload</button>
+      </div>
+      <div class="note">Saves a personality profile and applies it live — no restart needed.</div>
+    </section>
+
+    <section style="margin-top:18px">
+      <h2>Conversation</h2>
+      <div id="chat"><div class="empty">No transcript yet.</div></div>
+      <div class="note">Read from <code>logs/app.log</code>, refreshed every 3s. Only
+        covers runs started through this harness.</div>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+let toastT;
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');
+  clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),2200);}
+const api=(u,o)=>fetch(u,o).then(r=>r.json());
+
+function pill(el,ok,txt){el.className='pill '+(ok?'on':'off');el.textContent=txt;}
+
+let dragging=false;
+['vol','mic'].forEach(id=>{
+  const el=$('#'+id);
+  el.addEventListener('input',()=>{$('#'+id+'-v').textContent=el.value;dragging=true;});
+  el.addEventListener('change',async()=>{
+    await api('/api/'+(id==='vol'?'volume':'mic'),{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({volume:+el.value})});
+    dragging=false;toast((id==='vol'?'Volume':'Mic')+' → '+el.value);
+  });
+});
+
+$('#test').onclick=async()=>{await api('/api/test-sound',{method:'POST'});toast('Test sound sent');};
+
+let muted=false;
+$('#mute').onclick=async()=>{
+  muted=!muted;
+  await api('/api/mute',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({muted})});
+  toast(muted?'Mic muted':'Mic live');refresh();
+};
+
+$('#clearmem').onclick=async()=>{
+  const r=await api('/api/memory/clear',{method:'POST'});
+  toast(r.ok?`Cleared ${r.cleared} fact(s)`:'Failed');refresh();
+};
+
+async function loadPrompt(){
+  const name=$('#pers').value||'Default';
+  const r=await api('/api/prompt?name='+encodeURIComponent(name));
+  $('#instr').value=r.instructions||'';
+}
+$('#pers').onchange=loadPrompt;
+$('#reload').onclick=()=>{loadPrompt();toast('Reloaded');};
+
+$('#save').onclick=async()=>{
+  const btn=$('#save');btn.disabled=true;btn.textContent='Saving…';
+  const r=await api('/api/prompt',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:$('#pname').value||'custom',instructions:$('#instr').value})});
+  btn.disabled=false;btn.textContent='Save & apply';
+  toast(r.ok?'Applied live':'Failed: '+(r.error||'?'));
+};
+
+let lastLen=0;
+async function refreshChat(){
+  const {turns}=await api('/api/transcript');
+  const c=$('#chat');
+  if(!turns.length){c.innerHTML='<div class="empty">No transcript yet.</div>';return;}
+  if(turns.length===lastLen)return;
+  const atBottom=c.scrollHeight-c.scrollTop-c.clientHeight<60;
+  lastLen=turns.length;
+  c.innerHTML=turns.map(t=>`<div class="turn ${t.role}"><div class="who">${t.role} · ${t.ts.slice(11)}</div>${
+    t.content.replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</div>`).join('');
+  if(atBottom)c.scrollTop=c.scrollHeight;
+}
+
+let persLoaded=false;
+async function refresh(){
+  const s=await api('/api/state');
+  pill($('#p-daemon'),s.daemon,s.daemon?'daemon up':'daemon down');
+  pill($('#p-ui'),s.app_ui,s.app_ui?'app connected':'app UI off');
+  $('#p-dev').textContent=s.device||'';
+  $('#p-dev').className='pill';
+  if(!dragging){
+    if(s.volume!=null){$('#vol').value=s.volume;$('#vol-v').textContent=s.volume;}
+    if(s.mic!=null){$('#mic').value=s.mic;$('#mic-v').textContent=s.mic;}
+  }
+  const f=$('#facts');
+  f.innerHTML=(s.memory&&s.memory.length)
+    ? s.memory.map(x=>`<div class="fact"><span>${x.text}</span></div>`).join('')
+    : '<div class="empty">No saved facts.</div>';
+  if(s.muted!=null){muted=s.muted;$('#mute').textContent=muted?'Unmute mic':'Mute mic';}
+  $('#mute').disabled=!s.app_ui;
+  $('#ui-warn').style.display=s.app_ui?'none':'block';
+  ['pers','instr','pname','save','reload'].forEach(i=>$('#'+i).disabled=!s.app_ui);
+  if(s.app_ui&&!persLoaded&&s.personalities){
+    persLoaded=true;
+    $('#pers').innerHTML=s.personalities.map(p=>`<option ${p===s.current_personality?'selected':''}>${p}</option>`).join('');
+    loadPrompt();
+  }
+  if(!s.app_ui)persLoaded=false;
+}
+refresh();refreshChat();
+setInterval(refresh,4000);
+setInterval(refreshChat,3000);
+</script></body></html>
+"""
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Reachy Mini control panel")
+    ap.add_argument("--port", type=int, default=7870)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args()
+
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"Control panel  →  http://{args.host}:{args.port}")
+    print(f"  daemon  {DAEMON}   (volume)")
+    print(f"  app UI  {APP_UI}   (system prompt — needs 'reachy-app start --ui')")
+    print(f"  log     {LOG_FILE}")
+    print("Ctrl-C to stop.")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+
+
+if __name__ == "__main__":
+    main()

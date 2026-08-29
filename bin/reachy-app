@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+#
+# reachy-app — start/stop the Reachy Mini conversation app from a known-good venv.
+#
+# Why this exists: the app must run from a pinned venv (conversation app 0.10.0 +
+# reachy-mini 1.9.0), launched by absolute path so conda's base env can't shadow
+# GStreamer's glib. See README.md for the full story.
+
+set -uo pipefail
+
+VENV="${REACHY_VENV:-$HOME/reachy-conv}"
+APP_BIN="$VENV/bin/reachy-mini-conversation-app"
+PY="$VENV/bin/python"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_DIR="$REPO_ROOT/.run"
+LOG_DIR="$REPO_ROOT/logs"
+PID_FILE="$RUN_DIR/app.pid"
+LOG_FILE="$LOG_DIR/app.log"
+
+CONTROL_VENV_PY="$HOME/Library/Application Support/com.pollen-robotics.reachy-mini/.venv/bin/python3"
+
+EXPECTED_SDK="1.9.0"
+EXPECTED_APP="0.10.0"
+
+mkdir -p "$RUN_DIR" "$LOG_DIR"
+
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_yel" "$c_off" "$*"; }
+err()  { printf '%s✗%s %s\n' "$c_red" "$c_off" "$*" >&2; }
+dim()  { printf '%s%s%s\n' "$c_dim" "$*" "$c_off"; }
+
+# --- helpers ---------------------------------------------------------------
+
+running_pid() {
+  # Echo the live app PID, or nothing. Verifies the PID actually belongs to the
+  # app -- a stale PID file could otherwise point at a recycled, unrelated pid.
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null)"
+  [ -n "${pid:-}" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  ps -p "$pid" -o command= 2>/dev/null | grep -q "reachy-mini-conversation-app" || return 1
+  echo "$pid"
+}
+
+daemon_up() {
+  # The Control app runs the daemon; the app cannot connect without it.
+  nc -z 127.0.0.1 8000 >/dev/null 2>&1
+}
+
+require_venv() {
+  if [ ! -x "$APP_BIN" ]; then
+    err "No app binary at $APP_BIN"
+    dim "  Set REACHY_VENV if your venv lives elsewhere, or rebuild it (see README)."
+    exit 1
+  fi
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_start() {
+  require_venv
+
+  local pid
+  if pid="$(running_pid)"; then
+    warn "Already running (pid $pid). Use '$(basename "$0") restart' to bounce it."
+    return 0
+  fi
+
+  if ! daemon_up; then
+    err "Daemon not reachable on 127.0.0.1:8000."
+    dim "  Start the 'Reachy Mini Control' app first -- it launches the daemon."
+    exit 1
+  fi
+
+  if [ ! -f "$HOME/.cache/huggingface/token" ] && [ -z "${HF_TOKEN:-}" ]; then
+    warn "No cached HF token and HF_TOKEN unset -- the realtime backend may fail auth."
+  fi
+
+  # Launch by absolute path with conda scrubbed from the environment. Activating
+  # conda (or inheriting its PATH) makes GStreamer load anaconda's older glib and
+  # die on a missing _g_once_init_enter_pointer symbol.
+  local clean_path
+  clean_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i 'anaconda\|miniconda\|/conda' | paste -sd: -)"
+
+  env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_EXE -u CONDA_PYTHON_EXE \
+      -u PYTHONPATH -u PYTHONHOME \
+      PATH="$clean_path" \
+      "$APP_BIN" "$@" >>"$LOG_FILE" 2>&1 &
+
+  local newpid=$!
+  echo "$newpid" >"$PID_FILE"
+
+  sleep 2
+  if ! kill -0 "$newpid" 2>/dev/null; then
+    err "App exited immediately. Last lines:"
+    tail -n 15 "$LOG_FILE" >&2
+    rm -f "$PID_FILE"
+    exit 1
+  fi
+
+  ok "Started (pid $newpid)"
+  dim "  logs: $LOG_FILE"
+  dim "  follow with: $(basename "$0") logs"
+}
+
+cmd_stop() {
+  local pid
+  if ! pid="$(running_pid)"; then
+    warn "Not running."
+    rm -f "$PID_FILE"
+    return 0
+  fi
+
+  # SIGTERM, not SIGINT. Measured: a backgrounded app ignores SIGINT entirely
+  # (still alive after 60s, nothing logged) because it has no controlling
+  # terminal -- Ctrl-C only works when you run it in the foreground yourself.
+  # SIGTERM exits in ~1s.
+  kill -TERM "$pid" 2>/dev/null
+  local i
+  for i in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || { ok "Stopped (pid $pid)"; rm -f "$PID_FILE"; return 0; }
+    sleep 0.5
+  done
+
+  err "Would not exit after 10s. Escalating to SIGKILL."
+  kill -KILL "$pid" 2>/dev/null
+  sleep 1
+  rm -f "$PID_FILE"
+  ok "Killed (pid $pid)"
+}
+
+cmd_restart() { cmd_stop; sleep 1; cmd_start "$@"; }
+
+cmd_status() {
+  local pid
+  if pid="$(running_pid)"; then
+    ok "App running (pid $pid)"
+  else
+    warn "App not running"
+  fi
+
+  if daemon_up; then
+    ok "Daemon up (127.0.0.1:8000)"
+  else
+    err "Daemon down -- start the Reachy Mini Control app"
+  fi
+
+  if [ -x "$PY" ]; then
+    "$PY" - <<'PYEOF'
+import importlib.metadata as m
+for p in ("reachy-mini", "reachy-mini-conversation-app"):
+    try:
+        print(f"  {p:32s} {m.version(p)}")
+    except Exception:
+        print(f"  {p:32s} (not installed)")
+PYEOF
+  fi
+}
+
+cmd_doctor() {
+  echo "Venv:  $VENV"
+  echo
+
+  require_venv
+
+  local sdk app
+  sdk="$("$PY" -c "import importlib.metadata as m; print(m.version('reachy-mini'))" 2>/dev/null || echo "?")"
+  app="$("$PY" -c "import importlib.metadata as m; print(m.version('reachy-mini-conversation-app'))" 2>/dev/null || echo "?")"
+
+  [ "$sdk" = "$EXPECTED_SDK" ] && ok "SDK $sdk (pinned)" || err "SDK is $sdk, expected $EXPECTED_SDK -- pin has drifted"
+  [ "$app" = "$EXPECTED_APP" ] && ok "Conversation app $app (pinned)" || err "App is $app, expected $EXPECTED_APP -- pin has drifted"
+
+  daemon_up && ok "Daemon reachable on :8000" || warn "Daemon down (start Reachy Mini Control)"
+
+  [ -f "$HOME/.cache/huggingface/token" ] && ok "HF token cached" || warn "No cached HF token"
+
+  # The real gate on returning to the dashboard is the SDK the Control app
+  # bundles -- NOT the newest version on PyPI. Check the bundle directly.
+  echo
+  if [ -x "$CONTROL_VENV_PY" ]; then
+    local bundled
+    bundled="$("$CONTROL_VENV_PY" -c "import importlib.metadata as m; print(m.version('reachy-mini'))" 2>/dev/null || echo "?")"
+    echo "Control app bundles SDK: $bundled"
+    case "$bundled" in
+      1.9.*|1.8.*|1.7.*|"?")
+        dim "  Still pre-1.10 -> dashboard path stays broken, keep using this harness." ;;
+      *)
+        ok "  >=1.10 -- the dashboard may work again; time to revisit the v0.10.0 pin." ;;
+    esac
+  else
+    warn "Could not find the Control app's bundled python"
+  fi
+}
+
+cmd_panel() {
+  # The app only serves its personality API when started with --ui, so the
+  # prompt editor stays greyed out otherwise. Volume and transcript work either way.
+  if running_pid >/dev/null && ! nc -z 127.0.0.1 7860 >/dev/null 2>&1; then
+    warn "App is running without --ui, so the system prompt editor will be disabled."
+    dim "  Bounce it with: $(basename "$0") restart --ui"
+  fi
+  exec "$REPO_ROOT/bin/control-panel" "$@"
+}
+
+cmd_logs() {
+  [ -f "$LOG_FILE" ] || { warn "No log file yet at $LOG_FILE"; return 0; }
+  tail -f "$LOG_FILE"
+}
+
+usage() {
+  cat <<EOF
+usage: $(basename "$0") <command> [-- app args]
+
+  start [args]   Launch the conversation app (background, logged)
+  stop           Graceful shutdown (SIGINT -> TERM -> KILL)
+  restart        stop, then start
+  status         Is it running? Is the daemon up? What versions?
+  doctor         Verify pins and report whether the dashboard is usable yet
+  logs           Follow the log file
+  panel          Web control panel: prompt, transcript, volume, memory
+
+Extra args pass through to the app, e.g.:
+  $(basename "$0") start --no-camera
+  $(basename "$0") start --ui          # web UI on http://127.0.0.1:7860/
+  $(basename "$0") start --debug
+
+Override the venv with REACHY_VENV=/path/to/venv
+EOF
+}
+
+case "${1:-}" in
+  start)   shift; cmd_start "$@" ;;
+  stop)    cmd_stop ;;
+  restart) shift; cmd_restart "$@" ;;
+  status)  cmd_status ;;
+  doctor)  cmd_doctor ;;
+  logs)    cmd_logs ;;
+  panel)   shift; cmd_panel "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) err "Unknown command: $1"; echo; usage; exit 1 ;;
+esac
