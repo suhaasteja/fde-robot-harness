@@ -144,6 +144,23 @@ def read_transcript(limit: int = 200):
     return turns[-limit:]
 
 
+TRUEFORGE = os.getenv("TRUEFORGE_BASE_URL", "http://localhost:8790").rstrip("/")
+SESSION_FILE = REPO_ROOT / ".run" / "trueforge_session"
+
+
+def read_trueforge_session() -> str | None:
+    """The thread ask_agent is currently writing to.
+
+    TrueForge's own sidebar only refreshes on page load, so a session the robot
+    opens while you are watching never appears. Surfacing the id here lets the
+    page point straight at it instead.
+    """
+    try:
+        return SESSION_FILE.read_text().strip() or None
+    except OSError:
+        return None
+
+
 def read_memory():
     if not MEMORY_FILE.exists():
         return []
@@ -248,6 +265,8 @@ class Handler(BaseHTTPRequestHandler):
                 "mic": mic.get("volume") if ok_m else None,
                 "device": vol.get("device") if ok_v else None,
                 "memory": read_memory(),
+                "trueforge_session": read_trueforge_session(),
+                "trueforge_url": TRUEFORGE,
             }
             if ui:
                 pfx = app_prefix() or ""
@@ -461,6 +480,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <button class="ghost tab on" id="tab-ctl">Control</button>
   <button class="ghost tab" id="tab-incident">Incident</button>
   <button class="ghost tab" id="tab-app">Robot UI</button>
+  <button class="ghost tab" id="tab-tf">Agent</button>
 </header>
 <iframe id="appframe" src="about:blank" style="display:none;width:100%;height:calc(100vh - 62px);border:0"></iframe>
 <div id="incident" class="incident-view" style="display:none">
@@ -482,6 +502,12 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <div class="stages" id="stages"></div>
     <div class="merge-lock" id="merge-lock"><span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small></div>
   </section>
+</div>
+<div id="tfwrap" style="display:none">
+  <div id="tfnone" class="empty" style="padding:40px 20px">
+    No agent thread yet. Ask the robot something that needs the web, and it appears here.
+  </div>
+  <iframe id="tfframe" src="about:blank" style="display:none;width:100%;height:calc(100vh - 62px);border:0"></iframe>
 </div>
 <main>
   <div>
@@ -618,6 +644,12 @@ async function refresh(){
   f.innerHTML=(s.memory&&s.memory.length)
     ? s.memory.map(x=>`<div class="fact"><span>${x.text}</span></div>`).join('')
     : '<div class="empty">No saved facts.</div>';
+  // A rotated or newly-created session swaps the iframe without a manual reload.
+  if(s.trueforge_session!==tfSession||s.trueforge_url!==tfBase){
+    tfSession=s.trueforge_session; tfBase=s.trueforge_url;
+    $('#tab-tf').textContent = tfSession ? 'Agent ●' : 'Agent';
+    if(curTab==='tf')syncAgentFrame();
+  }
   if(s.muted!=null){muted=s.muted;$('#mute').textContent=muted?'Unmute mic':'Mute mic';}
   $('#mute').disabled=!s.app_ui;
   $('#ui-warn').style.display=s.app_ui?'none':'block';
@@ -649,21 +681,26 @@ function connectEvents(){
 }
 
 let appLoaded=false;
+let curTab='ctl';
 function showTab(which){
   const app=which==='app';
   const incident=which==='incident';
-  document.querySelector('main').style.display=(app||incident)?'none':'grid';
+  const tf=which==='tf';
+  curTab=which;
+  document.querySelector('main').style.display=(app||incident||tf)?'none':'grid';
   $('#incident').style.display=incident?'block':'none';
   $('#appframe').style.display=app?'block':'none';
-  $('#tab-app').className='ghost tab'+(app?' on':'');
-  $('#tab-incident').className='ghost tab'+(incident?' on':'');
-  $('#tab-ctl').className='ghost tab'+(!app&&!incident?' on':'');
+  $('#tfwrap').style.display=tf?'block':'none';
+  for(const [id,name] of [['tab-ctl','ctl'],['tab-incident','incident'],['tab-app','app'],['tab-tf','tf']])
+    $('#'+id).className='ghost tab'+(which===name?' on':'');
   if(app&&!appLoaded){$('#appframe').src='http://127.0.0.1:7860/';appLoaded=true;}
   if(incident)refreshIncident();
+  if(tf)syncAgentFrame();
 }
 $('#tab-ctl').onclick=()=>showTab('ctl');
 $('#tab-app').onclick=()=>showTab('app');
 $('#tab-incident').onclick=()=>showTab('incident');
+$('#tab-tf').onclick=()=>showTab('tf');
 
 const esc=s=>String(s==null?'—':s).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 function evidenceState(value,doneValues=[]){
@@ -705,6 +742,18 @@ async function refreshIncident(){
   lock.innerHTML=merged?`<span>✓ MERGED · ${esc(s.commit)}</span><small>Approved evidence recorded</small>`:
     approved?`<span>🔓 APPROVED TO MERGE</span><small>Exact commit ${esc(s.commit)}</small>`:
     '<span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small>';
+}
+
+// Point the iframe straight at the live thread. TrueForge's own session VIEW
+// streams fine once open — it is only the sidebar that needs a page reload to
+// notice a new session. Following the id here removes that entirely.
+let tfSession=null, tfBase=null;
+function syncAgentFrame(){
+  const f=$('#tfframe');
+  if(!tfSession){ f.style.display='none'; $('#tfnone').style.display='block'; return; }
+  $('#tfnone').style.display='none'; f.style.display='block';
+  const want=(tfBase||'http://localhost:8790')+'/sessions/'+tfSession;
+  if(f.getAttribute('data-url')!==want){ f.setAttribute('data-url',want); f.src=want; }
 }
 
 refresh();refreshChat();connectEvents();

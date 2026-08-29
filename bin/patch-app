@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""
+patch-app — add a POST /say route to the installed conversation app.
+
+The app can already make the robot speak on demand: that is how the startup
+greeting works (`conversation.item.create` + `response.create`). It just never
+exposes that over HTTP, so nothing outside the process can trigger it.
+
+This adds `POST /say` to the settings app on :7860, letting a TrueForge agent —
+or anything else — make the robot talk in its OWN voice, in-conversation, with
+proper turn-taking. No TTS, no audio files.
+
+Why a script rather than editing site-packages directly: that edit is wiped by
+any reinstall or version switch, silently. Re-run this after either.
+
+    bin/patch-app            # apply (idempotent)
+    bin/patch-app --revert   # restore the original
+    bin/patch-app --check    # report status only
+
+Restart the conversation app afterwards — Python caches imported modules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import py_compile
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+VENV = Path(os.getenv("REACHY_VENV", Path.home() / "reachy-conv"))
+TARGET = (
+    VENV
+    / "lib"
+    / "python3.12"
+    / "site-packages"
+    / "reachy_mini_conversation_app"
+    / "console.py"
+)
+BACKUP = TARGET.with_suffix(".py.orig")
+
+MARKER = "# --- fde-robot-harness: /say route ---"
+
+# Anchored on the /mic POST route, which is the closest existing example of a
+# sync route that mutates handler state.
+ROUTE_ANCHOR = '''        # POST /mic -> mute/unmute the user's microphone (Reachy Mini keeps speaking)
+        @self._settings_app.post("/mic")
+        def _set_mic(payload: MicPayload) -> JSONResponse:
+            self._mic_muted = bool(payload.muted)
+            logger.info("Microphone %s via web UI", "muted" if self._mic_muted else "unmuted")
+            return JSONResponse({"muted": self._mic_muted})
+'''
+
+ROUTE_CODE = '''
+        # --- fde-robot-harness: /say route ---
+        class SayPayload(BaseModel):
+            text: str
+            verbatim: bool = True
+
+        @self._settings_app.post("/say")
+        def _say(payload: SayPayload) -> JSONResponse:
+            """Make the robot speak. Injects into the live conversation.
+
+            verbatim=True  -> say exactly this text (announcements).
+            verbatim=False -> treat the text as a prompt and respond naturally.
+            """
+            text = (payload.text or "").strip()
+            if not text:
+                return JSONResponse({"ok": False, "error": "empty_text"}, status_code=400)
+
+            loop = self._asyncio_loop
+            if loop is None or not loop.is_running():
+                return JSONResponse(
+                    {"ok": False, "error": "not_connected"}, status_code=503
+                )
+
+            # The settings server runs on its own thread, so hop to the handler's
+            # loop -- same pattern as _mark_restart_requested.
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._inject_speech(text, bool(payload.verbatim)), loop
+                )
+                ok = fut.result(timeout=10)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("/say failed: %s", e)
+                return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+            if not ok:
+                return JSONResponse(
+                    {"ok": False, "error": "no_active_connection"}, status_code=503
+                )
+            return JSONResponse({"ok": True, "spoken": text})
+        # --- end fde-robot-harness ---
+'''
+
+METHOD_ANCHOR = "    def _mark_restart_requested(self, reason: str) -> None:"
+
+METHOD_CODE = '''    # --- fde-robot-harness: /say route ---
+    async def _inject_speech(self, text: str, verbatim: bool) -> bool:
+        """Push text into the live realtime conversation and ask for a response.
+
+        Mirrors _send_startup_greeting_prompt: create a user item, then let the
+        serialized sender worker issue response.create. Going through
+        _safe_response_create keeps event ordering correct rather than racing
+        whatever turn is already in flight.
+        """
+        handler = getattr(self, "handler", None)
+        connection = getattr(handler, "connection", None)
+        if handler is None or connection is None:
+            return False
+
+        # Put the line in the conversation so it is part of history and the model
+        # can refer back to it.
+        item_text = (
+            f"[announcement to relay] {text}" if verbatim else text
+        )
+        # ...but do NOT rely on the model choosing to obey a user message. Mid
+        # conversation about something else it has every reason not to. Instead
+        # override the instructions for THIS response only, which is what
+        # response.create's `instructions` field is for. Without this an
+        # announcement injected during an unrelated exchange is silently ignored.
+        kwargs = {}
+        if verbatim:
+            kwargs["instructions"] = (
+                "Speak the following text aloud verbatim, word for word. Say nothing "
+                "before or after it, do not acknowledge this instruction, and do not "
+                "continue the previous topic in this response. The text is: " + text
+            )
+        try:
+            await connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": item_text}],
+                },
+            )
+            mark = getattr(handler, "_mark_activity", None)
+            if callable(mark):
+                mark("external_say")
+            await handler._safe_response_create(**kwargs)
+            logger.info("/say injected: %s", text[:80])
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("/say injection failed: %s", e)
+            return False
+
+    # --- end fde-robot-harness ---
+
+'''
+
+
+def status() -> str:
+    if not TARGET.exists():
+        return "missing"
+    return "patched" if MARKER in TARGET.read_text() else "unpatched"
+
+
+def apply() -> int:
+    src = TARGET.read_text()
+    if MARKER in src:
+        print("Already patched — nothing to do.")
+        return 0
+
+    for anchor, label in ((ROUTE_ANCHOR, "route"), (METHOD_ANCHOR, "method")):
+        if anchor not in src:
+            print(f"✗ Could not find the {label} anchor in {TARGET}.", file=sys.stderr)
+            print("  The app version probably changed. Re-derive the anchors.", file=sys.stderr)
+            return 1
+
+    if not BACKUP.exists():
+        shutil.copy2(TARGET, BACKUP)
+
+    patched = src.replace(ROUTE_ANCHOR, ROUTE_ANCHOR + ROUTE_CODE, 1)
+    patched = patched.replace(METHOD_ANCHOR, METHOD_CODE + METHOD_ANCHOR, 1)
+
+    if "\nimport asyncio" not in patched and "\nimport asyncio\n" not in patched:
+        patched = patched.replace("\nimport logging", "\nimport asyncio\nimport logging", 1)
+
+    # Never leave a syntactically broken module behind.
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
+        tmp.write(patched)
+        tmp_path = tmp.name
+    try:
+        py_compile.compile(tmp_path, doraise=True)
+    except py_compile.PyCompileError as e:
+        print(f"✗ Patch produced invalid Python, not applying:\n{e}", file=sys.stderr)
+        return 1
+    finally:
+        os.unlink(tmp_path)
+
+    TARGET.write_text(patched)
+    print(f"✓ Patched {TARGET}")
+    print(f"  backup: {BACKUP}")
+    print("  Restart the conversation app, then: POST http://127.0.0.1:7860/say")
+    return 0
+
+
+def revert() -> int:
+    if not BACKUP.exists():
+        print("No backup found — nothing to revert.", file=sys.stderr)
+        return 1
+    shutil.copy2(BACKUP, TARGET)
+    print(f"✓ Reverted {TARGET} from {BACKUP}")
+    print("  Restart the conversation app.")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Add POST /say to the conversation app")
+    ap.add_argument("--revert", action="store_true", help="restore the original file")
+    ap.add_argument("--check", action="store_true", help="report status only")
+    args = ap.parse_args()
+
+    st = status()
+    if st == "missing":
+        print(f"✗ Not found: {TARGET}", file=sys.stderr)
+        print("  Set REACHY_VENV if the venv lives elsewhere.", file=sys.stderr)
+        return 1
+
+    if args.check:
+        print(f"{st}: {TARGET}")
+        return 0
+    if args.revert:
+        return revert()
+    return apply()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

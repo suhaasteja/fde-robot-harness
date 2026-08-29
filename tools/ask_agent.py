@@ -17,6 +17,7 @@ Loaded via the app's external-tools mechanism:
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -43,10 +44,68 @@ SESSION_FILE = Path(
     )
 )
 
+# ...but not forever. Turns chain, so the thread's context grows with every
+# delegation. Left unbounded it eventually trips TrueForge's compaction, which
+# spends a model call to summarize and quietly loses detail, and the sidebar row
+# becomes an unnavigable wall titled after whatever was asked first.
+#
+# Rotating keeps each thread cheap to run and readable after the fact. Age is the
+# primary trigger (a working session is a natural unit); the turn cap is a
+# backstop for a very busy day.
+SESSION_TTL_HOURS = float(os.getenv("TRUEFORGE_SESSION_TTL_HOURS", "12"))
+SESSION_MAX_TURNS = int(os.getenv("TRUEFORGE_SESSION_MAX_TURNS", "40"))
+
 # Spoken conversation cannot tolerate a long silence, so cap the wait and return
 # a partial status rather than leaving the user staring at a mute robot.
 TURN_TIMEOUT = float(os.getenv("TRUEFORGE_TURN_TIMEOUT", "45"))
 POLL_INTERVAL = 1.5
+
+
+# Physical "I am working on it" signal. Delegations routinely outlast the spoken
+# START line, and a motionless robot reads as a crashed one. Rather than author
+# motion, replay a stock emotion: the library already ships `waiting`, which is
+# exactly this gesture and runs ~10s, so it loops cleanly.
+DAEMON_URL = os.getenv("REACHY_DAEMON_URL", "http://127.0.0.1:8000").rstrip("/")
+BUSY_MOVE = os.getenv("REACHY_BUSY_MOVE", "waiting")
+BUSY_LIBRARY = "pollen-robotics/reachy-mini-emotions-library"
+BUSY_ENABLED = os.getenv("REACHY_BUSY_MOTION", "1").strip().lower() not in ("0", "false", "no")
+
+
+async def _busy_motion() -> None:
+    """Loop a waiting gesture until cancelled.
+
+    Cancellation is the only exit: the caller cancels this the moment the turn
+    resolves. Errors are swallowed deliberately -- a robot that cannot wiggle
+    must not break a delegation that is otherwise working.
+    """
+    url = f"{DAEMON_URL}/api/move/play/recorded-move-dataset/{BUSY_LIBRARY}/{BUSY_MOVE}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            while True:
+                try:
+                    await client.post(url)
+                except Exception:  # noqa: BLE001
+                    return  # daemon gone or move unavailable; stop trying
+                # The move runs ~10s server-side; re-issue as it finishes.
+                await asyncio.sleep(10.0)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _stop_busy(task: "asyncio.Task | None") -> None:
+    """Cancel the busy loop and settle the robot."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{DAEMON_URL}/api/move/stop")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _token_headers() -> Dict[str, str]:
@@ -55,10 +114,34 @@ def _token_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+async def _should_rotate(
+    client: httpx.AsyncClient, headers: Dict[str, str], session: dict
+) -> str:
+    """Return a reason to rotate, or "" to keep using this session."""
+    created = str(session.get("created_at", ""))
+    if created:
+        try:
+            started = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            age_h = (datetime.now(timezone.utc) - started).total_seconds() / 3600
+            if age_h >= SESSION_TTL_HOURS:
+                return f"age {age_h:.1f}h >= {SESSION_TTL_HOURS}h"
+        except ValueError:
+            pass  # unparseable timestamp is not a reason to throw the session away
+
+    r = await client.get(
+        f"{TRUEFORGE_URL}/api/v1/sessions/{session['id']}/turns", headers=headers
+    )
+    if r.status_code == 200:
+        n = len(r.json().get("data", []))
+        if n >= SESSION_MAX_TURNS:
+            return f"{n} turns >= {SESSION_MAX_TURNS}"
+    return ""
+
+
 async def _resolve_session(
     client: httpx.AsyncClient, headers: Dict[str, str], agent_name: str
 ) -> str:
-    """Return the shared session id, reusing the stored one when it still exists.
+    """Return the shared session id, rotating it when it gets old or long.
 
     The server is the source of truth: a stored id is verified before reuse, so a
     restarted TrueForge (or a deleted session) transparently gets a fresh one
@@ -73,8 +156,12 @@ async def _resolve_session(
     if stored:
         r = await client.get(f"{TRUEFORGE_URL}/api/v1/sessions/{stored}", headers=headers)
         if r.status_code == 200:
-            return stored
-        logger.info("Stored TrueForge session %s is gone; opening a new one.", stored)
+            reason = await _should_rotate(client, headers, r.json()["data"])
+            if not reason:
+                return stored
+            logger.info("Rotating TrueForge session %s (%s).", stored, reason)
+        else:
+            logger.info("Stored TrueForge session %s is gone; opening a new one.", stored)
 
     r = await client.post(
         f"{TRUEFORGE_URL}/api/v1/sessions",
@@ -157,12 +244,18 @@ class AskAgent(Tool):
         logger.info("Tool call: ask_agent agent=%r question=%r", agent_name, question[:120])
         headers = {"Content-Type": "application/json", **_token_headers()}
 
-        # Spoken context first, so the TrueForge thread reads as a conversation
-        # rather than a bare instruction with no provenance.
+        # The "Spoken context:" prefix is what tells the agent this request came
+        # from someone standing in front of the robot, which is what triggers its
+        # narration rules. It must go on EVERY delegation: `context` is optional
+        # and the model frequently omits it, so keying the prefix off it meant the
+        # robot silently stopped narrating exactly when a real person was waiting.
         context = kwargs.get("context")
-        message = question
-        if isinstance(context, str) and context.strip():
-            message = f"Spoken context: {context.strip()}\n\nTask: {question}"
+        spoken = (
+            context.strip()
+            if isinstance(context, str) and context.strip()
+            else "The user asked the robot this out loud and is waiting for an answer."
+        )
+        message = f"Spoken context: {spoken}\n\nTask: {question}"
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -190,6 +283,10 @@ class AskAgent(Tool):
                 r.raise_for_status()
                 turn_id = r.json()["data"]["id"]
 
+                # Only now, with a turn genuinely running, start moving. Doing it
+                # earlier would twitch on a failed session/turn create.
+                busy = asyncio.create_task(_busy_motion()) if BUSY_ENABLED else None
+
                 waited = 0.0
                 while waited < TURN_TIMEOUT:
                     await asyncio.sleep(POLL_INTERVAL)
@@ -203,6 +300,7 @@ class AskAgent(Tool):
                     status = state.get("status")
 
                     if status == "done":
+                        await _stop_busy(busy)
                         # A "done" turn carrying requiredActions is paused, not
                         # finished -- it wants an approval or an MCP login that
                         # nobody can give it from a voice conversation.
@@ -221,12 +319,14 @@ class AskAgent(Tool):
                         }
 
                     if status in ("failed", "cancelled"):
+                        await _stop_busy(busy)
                         return {
                             "status": status,
                             "spoken": f"The agent {status}.",
                             "detail": str(state.get("error"))[:300],
                         }
 
+                await _stop_busy(busy)
                 return {
                     "status": "still_running",
                     "session_id": session_id,

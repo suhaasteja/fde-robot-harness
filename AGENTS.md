@@ -120,11 +120,126 @@ instance needs:
    `http://127.0.0.1:7880/mcp` (no auth). Add Bright Data / Qodo via the UI, since
    OAuth needs the browser flow.
 3. **Agent** — name it `robot-operator` (matches `TRUEFORGE_DEFAULT_AGENT`), attach
-   both connectors.
+   both connectors, and **preload the `say` tool** (see below).
+
+### Preload `say`, or the robot stays silent
+
+TrueForge uses [deferred tool loading](https://trueforge.dev/key-features/deferred-tool-loading):
+an agent sees only tool *names* and must call `get_tool_info` then `call_tool` to
+use one. A tool the model never bothers to expand is effectively invisible —
+instructing it to "call say" is not enough on its own, which cost a debugging
+round to discover.
+
+Preload it explicitly:
+
+```json
+"mcp_servers": [
+  {"name": "reachy-mini", "preload": true, "preload_tools": ["say", "robot_status"]},
+  {"name": "bright-data"}
+]
+```
+
+Leave `bright-data` deferred — it has many tools and preloading them all would
+bloat every prompt. That is the tradeoff deferred loading exists for: preload the
+few tools you want reached reflexively, defer the long tail.
+
+The instructions then tell it *when* to speak: before slow work, when it spawns a
+subagent, when the answer lands, and if something fails — never per tool call, which
+is unbearable to listen to.
+
+**Use `gpt-5-5`, not `gpt-5-4-mini`, for this agent.** The mini model could not hold
+the narration rules: it skipped announcements, and when it did speak it parroted the
+literal example phrasing from the instructions ("Checking the robot now.") while
+actually searching the web. `gpt-5-5` follows them reliably and writes fresh lines.
+That is a real cost difference per turn — but narration is the whole point of the
+robot knowing what it is doing, and the mini model cannot deliver it.
+
+Verified on a two-subagent task: 13 tool calls produced exactly 3 spoken lines —
+"I'll check Hacker News and Lobste.rs now.", "I'm sending two researchers to check
+both sites in parallel.", "Hacker News has the more technical top story today."
 
 Or by API — see the git log for `807e6d6`, which has the exact `curl` calls. Note
 `POST /api/v1/agents` takes `{name, manifest}`, and **updates are by `agent_id`,
 not name**.
+
+## Integrating with another TrueForge setup
+
+If you already run TrueForge with your own connectors (Qodo, a codebase, subagents),
+**you do not need any of this repo's code**. The robot is just another MCP
+connector. Point your TrueForge at it and attach it to any agent you already have.
+
+### What this repo exposes
+
+| Surface | Where | Needs |
+|---|---|---|
+| Robot as an MCP server — 14 tools | `http://127.0.0.1:7880/mcp` | `bin/robot-mcp` + daemon |
+| `POST /say` — make the robot speak | `http://127.0.0.1:7860/say` | `bin/patch-app` + the app running `--ui` |
+
+Tools: `robot_status`, `wake_up`, `go_to_sleep`, `look`, `set_antennas`,
+`stop_moving`, `list_moves`, `play_move`, `list_sounds`, `play_sound`,
+`set_volume`, `say`, `face_tracking`, `detected_face`.
+
+### Adding the robot to your agents
+
+```bash
+curl -X POST http://<your-trueforge>/api/v1/settings/mcp-servers \
+  -H 'Content-Type: application/json' -d '{"manifest":{
+    "name":"reachy-mini","type":"remote",
+    "url":"http://127.0.0.1:7880/mcp",
+    "description":"Control a Reachy Mini desk robot: motion, emotions, speech."}}'
+```
+
+Then on any agent — including one that already has Qodo and your codebase:
+
+```json
+"mcp_servers": [
+  {"name": "reachy-mini", "preload": true, "preload_tools": ["say", "robot_status"]},
+  {"name": "qodo"},
+  {"name": "your-codebase"}
+]
+```
+
+**Preload `say` or your agent will never speak.** TrueForge defers tool loading:
+agents see only tool *names* and must call `get_tool_info` first. A tool the model
+never expands is invisible, and no amount of instruction fixes it. This cost us a
+debugging round — see [Preload `say`](#preload-say-or-the-robot-stays-silent).
+
+Then tell the agent *when* to speak. The working rules are in
+`trueforge/robot-operator.agent.json` — copy the "Speaking out loud" block. The
+parts that matter: a hard 45-word cap per spoken line, never read a list aloud,
+and announce at start / on subagent spawn / on failure / with the result.
+
+**Use a capable model.** `gpt-5-4-mini` could not hold these rules — it skipped
+announcements and parroted example phrasing from the prompt while doing something
+else. `gpt-5-5` is reliable.
+
+### Calling your agents from the robot
+
+The reverse direction is `tools/ask_agent.py`. Point it at your agent:
+
+```bash
+TRUEFORGE_BASE_URL=http://<your-trueforge>
+TRUEFORGE_DEFAULT_AGENT=<your-agent-name>
+```
+
+Anything that agent can reach — Qodo, your codebase, your subagents — is then
+reachable by voice, with no change to this repo.
+
+### What actually needs the robot
+
+Only motion, audio and volume. Your agents, connectors, `ask_agent`, and the whole
+MCP surface work against `--mockup-sim` with no hardware — see
+[Without a robot](#without-a-robot). Someone can integrate and test the entire
+software path before the robot is ever plugged in.
+
+### Contract notes
+
+- Angles are **degrees** at the MCP boundary; the daemon wants radians and
+  `robot-mcp` converts. Do not send radians.
+- `say` returns `ok:true` for **queued**, not spoken. It is not proof of audio.
+- Long spoken lines get lost. Keep them short; the 45-word cap is not cosmetic.
+- Movement is real. The default `require_approval_for_tools: ["@write","@destructive"]`
+  gate is deliberate — an agent that moves hardware unattended is a bad default.
 
 ## Rules (read before changing anything)
 
@@ -163,10 +278,70 @@ not name**.
   every session, so a stale nickname outlives restarts and personality changes.
   Clear it in the control panel.
 - **`ask_agent` caps at 45s.** A deep crawl returns "still working", not an answer.
-  That is the timeout, not a broken integration.
+  That is the timeout, not a broken integration — and the spoken answer still
+  arrives later, because `say` does not depend on the `ask_agent` round trip.
+- **The robot plays the `waiting` emotion on a loop while a delegation runs**, so a
+  slow turn does not look like a crash. Disable with `REACHY_BUSY_MOTION=0`, or
+  swap the gesture with `REACHY_BUSY_MOVE=<emotion>` (`list_moves` for the 85
+  available).
+- **Editing anything in `tools/` needs an app restart.** Python caches imported
+  modules, so a running app silently keeps using the old code — the edit looks
+  like it did nothing.
 - **The app's API prefix moved between releases** — v0.8.0 serves
   `/personalities` at the root, v0.10.0 used `/api/v1`. `bin/control-panel` probes
   for it.
+
+## The /say patch
+
+`bin/robot-mcp`'s `say` tool needs a `POST /say` route that upstream does not
+ship. The app can already inject speech — that is how the startup greeting works
+(`conversation.item.create` + `response.create`) — it just exposes no HTTP door.
+`bin/patch-app` adds one:
+
+```bash
+bin/patch-app          # apply (idempotent)
+bin/patch-app --check  # patched / unpatched
+bin/patch-app --revert # restore the .orig backup
+```
+
+**Re-run it after any reinstall or version switch** — it edits the installed
+package, so a reinstall silently reverts it and `say` starts returning
+`say_not_available`. The script refuses to write anything that would not compile,
+and keeps `console.py.orig` beside the file it edits.
+
+Restart the app afterwards; Python caches imported modules.
+
+```bash
+curl -X POST http://127.0.0.1:7860/say -H 'Content-Type: application/json' \
+  -d '{"text":"Search finished."}'                     # says it word for word
+  -d '{"text":"Tell them it is done.","verbatim":false}' # phrases it itself
+```
+
+This matters beyond convenience: if a voice turn is interrupted, the app drops
+the tool result (`_wait_for_response_done_before_tool_result` times out after 30s
+and logs "Dropping realtime model result"), so the robot never speaks the answer
+and you have to ask again. Pushing speech through `/say` sidesteps that entirely,
+because it does not depend on the realtime response lifecycle.
+
+## TrueForge sessions
+
+Every `ask_agent` delegation lands in **one shared session**, so the UI shows a
+single readable thread with each tool call, its arguments and its result — rather
+than a new sidebar row per question. Turns chain, so the agent remembers earlier
+delegations. The id lives in `.run/trueforge_session` (gitignored); delete it to
+start a fresh thread.
+
+That thread is rotated rather than grown forever, since chained turns make context
+(and cost) creep up, and TrueForge's compaction would eventually spend a model call
+summarizing it:
+
+| Variable | Default | Trigger |
+|---|---|---|
+| `TRUEFORGE_SESSION_TTL_HOURS` | `12` | Session older than this |
+| `TRUEFORGE_SESSION_MAX_TURNS` | `40` | Backstop for a very busy day |
+
+Rotation is checked before each delegation, and a session that no longer exists
+server-side (TrueForge restarted, thread deleted) transparently opens a new one.
 
 ## Costs
 
@@ -174,3 +349,18 @@ not name**.
 speaking, and **an open session bills for the mic even in silence** (~$0.36/hr).
 Stop the app when you are not using it; that is what the 15-minute timeout is for.
 TrueForge agent turns bill separately on the same key.
+
+## Recreating the agent
+
+`trueforge/robot-operator.agent.json` is the exported spec — instructions,
+connectors, preloads. TrueForge stores agents in its own database, so this file is
+the only version-controlled copy. Restore it with:
+
+```bash
+curl -X POST http://localhost:8790/api/v1/agents \
+  -H 'Content-Type: application/json' \
+  -d @trueforge/robot-operator.agent.json
+```
+
+Updates go to `PUT /api/v1/agents/{agent_id}` — **by id, not name**. Get the id
+from `GET /api/v1/agents`.
