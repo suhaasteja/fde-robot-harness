@@ -171,6 +171,38 @@ not name**.
   `/personalities` at the root, v0.10.0 used `/api/v1`. `bin/control-panel` probes
   for it.
 
+## The /say patch
+
+`bin/robot-mcp`'s `say` tool needs a `POST /say` route that upstream does not
+ship. The app can already inject speech — that is how the startup greeting works
+(`conversation.item.create` + `response.create`) — it just exposes no HTTP door.
+`bin/patch-app` adds one:
+
+```bash
+bin/patch-app          # apply (idempotent)
+bin/patch-app --check  # patched / unpatched
+bin/patch-app --revert # restore the .orig backup
+```
+
+**Re-run it after any reinstall or version switch** — it edits the installed
+package, so a reinstall silently reverts it and `say` starts returning
+`say_not_available`. The script refuses to write anything that would not compile,
+and keeps `console.py.orig` beside the file it edits.
+
+Restart the app afterwards; Python caches imported modules.
+
+```bash
+curl -X POST http://127.0.0.1:7860/say -H 'Content-Type: application/json' \
+  -d '{"text":"Search finished."}'                     # says it word for word
+  -d '{"text":"Tell them it is done.","verbatim":false}' # phrases it itself
+```
+
+This matters beyond convenience: if a voice turn is interrupted, the app drops
+the tool result (`_wait_for_response_done_before_tool_result` times out after 30s
+and logs "Dropping realtime model result"), so the robot never speaks the answer
+and you have to ask again. Pushing speech through `/say` sidesteps that entirely,
+because it does not depend on the realtime response lifecycle.
+
 ## TrueForge sessions
 
 Every `ask_agent` delegation lands in **one shared session**, so the UI shows a
