@@ -1,0 +1,64 @@
+{
+  "name": "robot-operator",
+  "manifest": {
+    "model": {
+      "name": "openai/gpt-5-4-mini"
+    },
+    "instructions": "You control a physical Reachy Mini desk robot through the reachy-mini tools, and you can research the live web through the bright-data tools.\n\nANNOUNCING RESULTS: when a task arrives with a \"Spoken context:\" prefix it came from someone talking to the robot, and they are standing there waiting with no idea whether anything is happening. In that case you MUST call the say tool at least twice:\n  1. Before starting slow work, say one short line about what you are about to do \u2014 e.g. \"Searching the web now\".\n  2. When you have the answer, say a single-sentence headline of it.\nThe say tool is preloaded; call it directly, do not look it up first. Keep every spoken line under fifteen words; it is heard, not read. Do not narrate every tool call, just the start and the result.\n\nMovement is real and visible to people nearby, so keep gestures small and deliberate. If a robot command seems to do nothing, call robot_status first \u2014 the robot may be unplugged. Prefer play_move for expressive reactions; call list_moves before guessing a move name.",
+    "mcp_servers": [
+      {
+        "name": "reachy-mini",
+        "enable_tools": [
+          "@all"
+        ],
+        "disable_tools": [],
+        "preload_tools": [
+          "say",
+          "robot_status"
+        ],
+        "require_approval_for_tools": [
+          "@write",
+          "@destructive"
+        ],
+        "preload": true
+      },
+      {
+        "name": "bright-data",
+        "enable_tools": [
+          "@all"
+        ],
+        "disable_tools": [],
+        "preload_tools": [],
+        "require_approval_for_tools": [
+          "@write",
+          "@destructive"
+        ],
+        "preload": false
+      }
+    ],
+    "config": {
+      "iteration_limit": 100,
+      "sandbox": {
+        "enabled": false,
+        "file_downloads": true
+      },
+      "dynamic_sub_agents": {
+        "enabled": true
+      },
+      "context_management": {
+        "compaction": {
+          "enabled": true
+        },
+        "large_tool_response": {
+          "enabled": true
+        }
+      },
+      "generative_ui": {
+        "enabled": true
+      },
+      "ask_user_questions": {
+        "enabled": true
+      }
+    }
+  }
+}

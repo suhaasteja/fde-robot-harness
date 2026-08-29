@@ -120,7 +120,32 @@ instance needs:
    `http://127.0.0.1:7880/mcp` (no auth). Add Bright Data / Qodo via the UI, since
    OAuth needs the browser flow.
 3. **Agent** — name it `robot-operator` (matches `TRUEFORGE_DEFAULT_AGENT`), attach
-   both connectors.
+   both connectors, and **preload the `say` tool** (see below).
+
+### Preload `say`, or the robot stays silent
+
+TrueForge uses [deferred tool loading](https://trueforge.dev/key-features/deferred-tool-loading):
+an agent sees only tool *names* and must call `get_tool_info` then `call_tool` to
+use one. A tool the model never bothers to expand is effectively invisible —
+instructing it to "call say" is not enough on its own, which cost a debugging
+round to discover.
+
+Preload it explicitly:
+
+```json
+"mcp_servers": [
+  {"name": "reachy-mini", "preload": true, "preload_tools": ["say", "robot_status"]},
+  {"name": "bright-data"}
+]
+```
+
+Leave `bright-data` deferred — it has many tools and preloading them all would
+bloat every prompt. That is the tradeoff deferred loading exists for: preload the
+few tools you want reached reflexively, defer the long tail.
+
+The instructions then tell it *when* to speak: one line before slow work, one
+sentence when the answer lands, both under fifteen words. Verified — the robot
+said "Checking Hacker News now." and then the headline.
 
 Or by API — see the git log for `807e6d6`, which has the exact `curl` calls. Note
 `POST /api/v1/agents` takes `{name, manifest}`, and **updates are by `agent_id`,
@@ -229,3 +254,18 @@ server-side (TrueForge restarted, thread deleted) transparently opens a new one.
 speaking, and **an open session bills for the mic even in silence** (~$0.36/hr).
 Stop the app when you are not using it; that is what the 15-minute timeout is for.
 TrueForge agent turns bill separately on the same key.
+
+## Recreating the agent
+
+`trueforge/robot-operator.agent.json` is the exported spec — instructions,
+connectors, preloads. TrueForge stores agents in its own database, so this file is
+the only version-controlled copy. Restore it with:
+
+```bash
+curl -X POST http://localhost:8790/api/v1/agents \
+  -H 'Content-Type: application/json' \
+  -d @trueforge/robot-operator.agent.json
+```
+
+Updates go to `PUT /api/v1/agents/{agent_id}` — **by id, not name**. Get the id
+from `GET /api/v1/agents`.
