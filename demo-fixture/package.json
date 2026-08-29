@@ -1,0 +1,11 @@
+{
+  "name": "physical-soc-nextjs-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "next": "15.2.6"
+  }
+}

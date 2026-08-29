@@ -65,6 +65,7 @@ def reset_app_prefix() -> None:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = REPO_ROOT / "logs" / "app.log"
 MEMORY_FILE = Path.home() / ".local/share/reachy_mini_conversation_app/memory.v1.json"
+INCIDENT_FILE = REPO_ROOT / ".run" / "incident.json"
 
 # 2026-08-29 10:30:33,245 INFO ...console:885 | role=assistant content=Hi there
 LOG_RE = re.compile(
@@ -188,6 +189,42 @@ def app_ui_up() -> bool:
     return app_prefix() is not None
 
 
+def read_incident():
+    """Read the presentation state emitted by the SOC workflow.
+
+    The UI never invents successful work: absent evidence is explicitly pending.
+    soc-watch/TrueForge integration can atomically replace this JSON file as the
+    incident advances without coupling the panel to a volatile upstream schema.
+    """
+    state = {
+        "cve": "Waiting for incident",
+        "severity": "unknown",
+        "summary": "No active security advisory",
+        "service": "—",
+        "source": "—",
+        "fetched_at": None,
+        "session_id": None,
+        "commit": None,
+        "tests": {"status": "pending", "passed": 0, "total": 0},
+        "subagents": [],
+        "qodo": {"status": "pending", "pr": None, "finding": None, "followup": False},
+        "approval": {"status": "locked", "approver": None},
+        "merge": {"status": "locked"},
+    }
+    if INCIDENT_FILE.exists():
+        try:
+            incoming = json.loads(INCIDENT_FILE.read_text())
+            if isinstance(incoming, dict):
+                for key, value in incoming.items():
+                    if key in state and isinstance(state[key], dict) and isinstance(value, dict):
+                        state[key].update(value)
+                    else:
+                        state[key] = value
+        except Exception as e:
+            state["state_error"] = str(e)
+    return state
+
+
 # --- request handling ------------------------------------------------------
 
 
@@ -248,6 +285,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/transcript":
             return self._send({"turns": read_transcript()})
+
+        if p == "/api/incident":
+            return self._send(read_incident())
 
         if p == "/api/events":
             # Relay the app's SSE stream so the page can subscribe same-origin
@@ -391,19 +431,90 @@ button:disabled{opacity:.45;cursor:not-allowed}
   border:1px solid #2c3143;padding:10px 18px;border-radius:9px;opacity:0;transition:opacity .25s;
   pointer-events:none;font-size:13px}
 #toast.show{opacity:1}
+.incident-view{padding:24px;max-width:1440px;margin:0 auto}
+.incident-top{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,.8fr);gap:18px}
+.hero-card{background:linear-gradient(145deg,#171b27,#11141d);border:1px solid #292f40;
+  border-radius:18px;padding:26px;min-height:250px;position:relative;overflow:hidden}
+.hero-card:after{content:"";position:absolute;width:260px;height:260px;border-radius:50%;right:-100px;
+  top:-130px;background:radial-gradient(circle,rgba(239,68,68,.16),transparent 68%)}
+.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:#8992a7;font-weight:700}
+.severity{display:inline-flex;align-items:center;gap:8px;margin:20px 0 8px;padding:6px 10px;
+  border:1px solid #4b2530;background:#29151c;color:#fb7185;border-radius:8px;font-size:11px;
+  font-weight:800;letter-spacing:1px}
+.severity:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 12px currentColor}
+.hero-card h3{font-size:34px;line-height:1.05;margin:4px 0 10px;letter-spacing:-1.2px}
+.incident-summary{font-size:16px;color:#bbc2d2;max-width:720px;margin:0 0 24px}
+.meta{display:flex;gap:22px;flex-wrap:wrap;color:#7f899f;font-size:12px}.meta b{color:#d9deea;font-weight:600}
+.engine-card{background:#151823;border:1px solid #292f40;border-radius:18px;padding:22px}
+.engine-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px}
+.engine-title strong{font-size:14px}.live-dot{color:#60a5fa;font-size:11px}
+.engine-event{display:grid;grid-template-columns:22px 1fr auto;gap:10px;align-items:center;padding:11px 0;
+  border-top:1px solid #232838}.engine-event:first-of-type{border-top:0}
+.event-icon{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#202536;color:#69748c;font-size:11px}
+.engine-event.done .event-icon{background:#102d21;color:#4ade80}.engine-event.active .event-icon{background:#132949;color:#60a5fa}
+.engine-event.locked .event-icon{background:#302310;color:#fbbf24}.event-name{font-weight:600;font-size:12px}
+.event-detail{font-size:10px;color:#788298;text-align:right;max-width:110px;overflow:hidden;text-overflow:ellipsis}
+.timeline-card{margin-top:18px;background:#151823;border:1px solid #292f40;border-radius:18px;padding:22px}
+.timeline-head{display:flex;justify-content:space-between;align-items:end;margin-bottom:16px}
+.timeline-head h2{margin:0}.sha{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:#8b95aa}
+.stages{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+.stage{min-height:142px;background:#10131b;border:1px solid #252a39;border-radius:12px;padding:14px;position:relative}
+.stage-num{font-size:10px;color:#647087}.stage h4{font-size:12px;margin:20px 0 7px}.stage p{font-size:11px;color:#778197;margin:0}
+.stage.done{border-color:#244735;background:#101c18}.stage.done h4{color:#86efac}
+.stage.active{border-color:#684f20;background:#211b10;box-shadow:0 0 0 1px rgba(251,191,36,.08)}
+.stage.active h4{color:#fbbf24}.stage.failed{border-color:#572936;background:#241318}.stage.failed h4{color:#fb7185}
+.progress{height:5px;background:#242938;border-radius:5px;margin-top:14px;overflow:hidden}.progress span{display:block;height:100%;background:#4ade80}
+.review-box{margin-top:10px;font-size:10px;padding:7px;border-radius:7px;background:#181c28;color:#9ca6bb}
+.merge-lock{margin-top:16px;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;
+  border-radius:12px;background:#211b10;border:1px solid #684f20;color:#fbbf24;font-weight:700}
+.merge-lock.approved{background:#101f18;border-color:#28583d;color:#4ade80}
+.findings{margin-top:18px;background:#151823;border:1px solid #292f40;border-radius:18px;padding:22px}
+.finding-row{display:grid;grid-template-columns:160px 110px 1fr;gap:14px;padding:12px 0;border-top:1px solid #292f40;align-items:start}
+.finding-row:first-child{border-top:0}.finding-cve{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#e5e7eb}
+.finding-status{font-size:10px;font-weight:800;text-transform:uppercase;color:#93c5fd}.finding-status.applicable{color:#fb7185}
+.finding-reason{font-size:11px;color:#8992a7;line-height:1.45}
+.carousel{margin-top:18px;background:#151823;border:1px solid #292f40;border-radius:18px;padding:26px}
+.carousel-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}
+.carousel-nav{display:flex;align-items:center;gap:9px}.carousel-nav button{padding:7px 11px}
+.carousel-card{min-height:230px;border:1px solid #303748;border-radius:16px;padding:24px;
+  background:linear-gradient(135deg,#121722,#181b27);transition:opacity .2s}
+.carousel-card.applicable{border-color:#713442;box-shadow:inset 4px 0 #fb7185}
+.carousel-title{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.carousel-title h3{font:700 28px ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}
+.status-word{font-size:11px;font-weight:800;letter-spacing:1px;padding:6px 10px;border-radius:20px;
+  color:#93c5fd;background:#13233a;border:1px solid #29456d}
+.status-word.applicable{color:#fda4af;background:#2b151c;border-color:#713442}
+.carousel-reason{font-size:15px;line-height:1.6;color:#b7c0d1;margin:20px 0}
+.badges{display:flex;gap:9px;flex-wrap:wrap}.badge{font-size:11px;font-weight:700;padding:7px 10px;
+  border-radius:8px;background:#202536;color:#727d94;border:1px solid #303748}
+.badge.done{background:#102d21;color:#86efac;border-color:#28583d}.badge.active{background:#302310;color:#fbbf24;border-color:#684f20}
+.carousel-dots{display:flex;gap:7px;justify-content:center;margin-top:18px}.carousel-dot{width:7px;height:7px;
+  border-radius:50%;background:#3a4050}.carousel-dot.on{background:#60a5fa;box-shadow:0 0 8px #60a5fa}
+@media(max-width:1000px){.incident-top{grid-template-columns:1fr}.stages{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <header>
-  <h1>Reachy Mini</h1>
-  <span class="pill" id="p-daemon">daemon</span>
-  <span class="pill" id="p-ui">app</span>
-  <span class="pill" id="p-live">connecting</span>
-  <span class="pill" id="p-dev"></span>
+  <h1>Physical SOC</h1>
+  <span class="pill on">● LIVE · 60 SECOND SCAN</span>
+  <span id="p-daemon" style="display:none"></span><span id="p-ui" style="display:none"></span>
+  <span id="p-live" style="display:none"></span><span id="p-dev" style="display:none"></span>
   <span style="flex:1"></span>
-  <button class="ghost tab on" id="tab-ctl">Control</button>
-  <button class="ghost tab" id="tab-app">Robot UI</button>
+  <button class="ghost tab on" id="tab-incident">CVE Monitor</button>
   <button class="ghost tab" id="tab-tf">Agent</button>
 </header>
 <iframe id="appframe" src="about:blank" style="display:none;width:100%;height:calc(100vh - 62px);border:0"></iframe>
+<div id="incident" class="incident-view" style="display:none">
+  <section class="carousel">
+    <div class="carousel-head"><div><div class="eyebrow">Repository vulnerability stream</div><h2 style="margin:5px 0 0">Recently evaluated</h2></div>
+      <div class="carousel-nav"><span class="sha" id="finding-count">0 CVEs</span><button class="ghost" id="c-prev">←</button><button class="ghost" id="c-next">→</button></div></div>
+    <article class="carousel-card" id="c-card"><div class="empty">Waiting for first repository scan.</div></article>
+    <div class="carousel-dots" id="c-dots"></div>
+  </section>
+  <section class="timeline-card">
+    <div class="timeline-head"><h2>Incident response</h2><span class="sha" id="i-sha">NO COMMIT</span></div>
+    <div class="stages" id="stages"></div>
+    <div class="merge-lock" id="merge-lock"><span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small></div>
+  </section>
+</div>
 <div id="tfwrap" style="display:none">
   <div id="tfnone" class="empty" style="padding:40px 20px">
     No agent thread yet. Ask the robot something that needs the web, and it appears here.
@@ -582,20 +693,81 @@ function connectEvents(){
 }
 
 let appLoaded=false;
-let curTab='ctl';
+let curTab='incident';
 function showTab(which){
+  const app=which==='app';
+  const incident=which==='incident';
+  const tf=which==='tf';
   curTab=which;
-  document.querySelector('main').style.display=which==='ctl'?'grid':'none';
-  $('#appframe').style.display=which==='app'?'block':'none';
-  $('#tfwrap').style.display=which==='tf'?'block':'none';
-  for(const [id,name] of [['tab-ctl','ctl'],['tab-app','app'],['tab-tf','tf']])
-    $('#'+id).className='ghost tab'+(which===name?' on':'');
-  if(which==='app'&&!appLoaded){$('#appframe').src='http://127.0.0.1:7860/';appLoaded=true;}
-  if(which==='tf')syncAgentFrame();
+  document.querySelector('main').style.display=(app||incident||tf)?'none':'grid';
+  $('#incident').style.display=incident?'block':'none';
+  $('#appframe').style.display=app?'block':'none';
+  $('#tfwrap').style.display=tf?'block':'none';
+  for(const [id,name] of [['tab-incident','incident'],['tab-tf','tf']]){
+    const tab=$('#'+id);if(tab)tab.className='ghost tab'+(which===name?' on':'');
+  }
+  if(app&&!appLoaded){$('#appframe').src='http://127.0.0.1:7860/';appLoaded=true;}
+  if(incident)refreshIncident();
+  if(tf)syncAgentFrame();
 }
-$('#tab-ctl').onclick=()=>showTab('ctl');
-$('#tab-app').onclick=()=>showTab('app');
+$('#tab-incident').onclick=()=>showTab('incident');
 $('#tab-tf').onclick=()=>showTab('tf');
+
+const esc=s=>String(s==null?'—':s).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function evidenceState(value,doneValues=[]){
+  if(doneValues.includes(value))return 'done';
+  if(['running','reviewing','pending_approval'].includes(value))return 'active';
+  return 'locked';
+}
+async function refreshIncident(){
+  const s=await api('/api/incident');
+  $('#i-sha').textContent=s.commit?`COMMIT ${s.commit}`:'NO COMMIT';
+  const monitor=s.monitor||{};
+  const findings=monitor.findings||[];
+  $('#finding-count').textContent=`${findings.length} CVE${findings.length===1?'':'s'}`;
+  renderFinding(findings,monitor.incidents||[]);
+  const tests=s.tests||{},q=s.qodo||{},approval=s.approval||{},merge=s.merge||{};
+  const agents=s.subagents||[];
+  const testDone=tests.status==='passed',qDone=['passed','complete','approved'].includes(q.status);
+  const items=[
+    ['Detected',s.fetched_at?'done':'locked',s.source||'Awaiting MCP evidence',''],
+    ['Reproduced',tests.status!=='pending'?'done':'locked',tests.before||'Awaiting failing test',''],
+    ['Patched',s.commit?'done':'locked',s.commit?`Commit ${s.commit}`:'No patch generated',''],
+    ['Sandbox tests',testDone?'done':tests.status==='failed'?'failed':tests.status==='running'?'active':'locked',testDone?`${tests.passed}/${tests.total} passed`:tests.status||'Not started',tests.total?`<div class="progress"><span style="width:${Math.min(100,100*(tests.passed||0)/tests.total)}%"></span></div>`:''],
+    ['Qodo review',qDone?'done':q.status==='reviewing'?'active':'locked',q.pr||'Awaiting code checks',q.finding?`<div class="review-box">${esc(q.finding)}${q.followup?' · follow-up complete':''}</div>`:''],
+    ['Approval',approval.status==='approved'?'done':approval.status==='waiting'?'active':'locked',approval.status==='waiting'?`Waiting for ${approval.approver||'approver'}`:approval.status||'Locked','']
+  ];
+  $('#stages').innerHTML=items.map(([name,state,detail,extra],i)=>`<article class="stage ${state}"><span class="stage-num">0${i+1}</span><h4>${esc(name)}</h4><p>${esc(detail)}</p>${extra}</article>`).join('');
+  const merged=merge.status==='merged',approved=approval.status==='approved';
+  const lock=$('#merge-lock');lock.className='merge-lock'+(merged?' approved':'');
+  lock.innerHTML=merged?`<span>✓ MERGED · ${esc(s.commit)}</span><small>Approved evidence recorded</small>`:
+    approved?`<span>🔓 APPROVED TO MERGE</span><small>Exact commit ${esc(s.commit)}</small>`:
+    '<span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small>';
+}
+
+let findingIndex=0,lastFindingCount=0;
+function renderFinding(findings,incidents){
+  if(!findings.length){$('#c-card').innerHTML='<div class="empty">Waiting for first repository scan.</div>';return;}
+  if(findings.length!==lastFindingCount){findingIndex=0;lastFindingCount=findings.length;}
+  findingIndex=(findingIndex+findings.length)%findings.length;
+  const f=findings[findingIndex],incident=incidents.find(x=>x.cve===f.cve)||{};
+  const applicable=f.status==='applicable';
+  const announced=!!(incident.discovery_announced||incident.announced);
+  const committed=!!incident.sha;
+  const reviewed=!!incident.qodo_reviewed_sha||['checkpoint_pending','approval_ready','merged'].includes(incident.status);
+  const approval=incident.status==='approval_ready'?'active':incident.status==='merged'?'done':'';
+  $('#c-card').className='carousel-card'+(applicable?' applicable':'');
+  $('#c-card').innerHTML=`<div class="carousel-title"><h3>${esc(f.cve)}</h3><span class="status-word ${applicable?'applicable':''}">${applicable?'APPLICABLE':'EVALUATED'}</span></div>
+    <p class="carousel-reason">${esc(f.reason)}</p><div class="badges">
+    <span class="badge ${announced?'done':''}">${announced?'✓ REACHY ANNOUNCED':'REACHY NOT NEEDED'}</span>
+    <span class="badge ${committed?'done':''}">${committed?'✓ PR COMMITTED':'NO PATCH COMMIT'}</span>
+    <span class="badge ${reviewed?'done':committed?'active':''}">${reviewed?'✓ QODO REVIEWED':committed?'QODO REVIEWING':'QODO NOT NEEDED'}</span>
+    <span class="badge ${approval}">${approval==='done'?'✓ MERGED':approval==='active'?'● AWAITING VOICE APPROVAL':'NO APPROVAL REQUIRED'}</span></div>`;
+  $('#c-dots').innerHTML=findings.map((_,i)=>`<span class="carousel-dot ${i===findingIndex?'on':''}"></span>`).join('');
+}
+$('#c-prev').onclick=()=>{findingIndex--;refreshIncident();};
+$('#c-next').onclick=()=>{findingIndex++;refreshIncident();};
+setInterval(()=>{if(curTab==='incident'&&lastFindingCount>1){findingIndex++;refreshIncident();}},6000);
 
 // Point the iframe straight at the live thread. TrueForge's own session VIEW
 // streams fine once open — it is only the sidebar that needs a page reload to
@@ -609,9 +781,10 @@ function syncAgentFrame(){
   if(f.getAttribute('data-url')!==want){ f.setAttribute('data-url',want); f.src=want; }
 }
 
-refresh();refreshChat();connectEvents();
+refresh();refreshChat();connectEvents();showTab('incident');
 setInterval(refresh,4000);
 setInterval(()=>{if(!es)refreshChat();},3000);   // fallback only
+setInterval(refreshIncident,1500);
 </script></body></html>
 """
 
