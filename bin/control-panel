@@ -473,41 +473,47 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .finding-row:first-child{border-top:0}.finding-cve{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#e5e7eb}
 .finding-status{font-size:10px;font-weight:800;text-transform:uppercase;color:#93c5fd}.finding-status.applicable{color:#fb7185}
 .finding-reason{font-size:11px;color:#8992a7;line-height:1.45}
+.carousel{margin-top:18px;background:#151823;border:1px solid #292f40;border-radius:18px;padding:26px}
+.carousel-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}
+.carousel-nav{display:flex;align-items:center;gap:9px}.carousel-nav button{padding:7px 11px}
+.carousel-card{min-height:230px;border:1px solid #303748;border-radius:16px;padding:24px;
+  background:linear-gradient(135deg,#121722,#181b27);transition:opacity .2s}
+.carousel-card.applicable{border-color:#713442;box-shadow:inset 4px 0 #fb7185}
+.carousel-title{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.carousel-title h3{font:700 28px ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}
+.status-word{font-size:11px;font-weight:800;letter-spacing:1px;padding:6px 10px;border-radius:20px;
+  color:#93c5fd;background:#13233a;border:1px solid #29456d}
+.status-word.applicable{color:#fda4af;background:#2b151c;border-color:#713442}
+.carousel-reason{font-size:15px;line-height:1.6;color:#b7c0d1;margin:20px 0}
+.badges{display:flex;gap:9px;flex-wrap:wrap}.badge{font-size:11px;font-weight:700;padding:7px 10px;
+  border-radius:8px;background:#202536;color:#727d94;border:1px solid #303748}
+.badge.done{background:#102d21;color:#86efac;border-color:#28583d}.badge.active{background:#302310;color:#fbbf24;border-color:#684f20}
+.carousel-dots{display:flex;gap:7px;justify-content:center;margin-top:18px}.carousel-dot{width:7px;height:7px;
+  border-radius:50%;background:#3a4050}.carousel-dot.on{background:#60a5fa;box-shadow:0 0 8px #60a5fa}
 @media(max-width:1000px){.incident-top{grid-template-columns:1fr}.stages{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <header>
-  <h1>Reachy Mini</h1>
-  <span class="pill" id="p-daemon">daemon</span>
-  <span class="pill" id="p-ui">app</span>
-  <span class="pill" id="p-live">connecting</span>
-  <span class="pill" id="p-dev"></span>
+  <h1>Physical SOC</h1>
+  <span class="pill on">● LIVE · 60 SECOND SCAN</span>
+  <span id="p-daemon" style="display:none"></span><span id="p-ui" style="display:none"></span>
+  <span id="p-live" style="display:none"></span><span id="p-dev" style="display:none"></span>
   <span style="flex:1"></span>
-  <button class="ghost tab on" id="tab-ctl">Control</button>
-  <button class="ghost tab" id="tab-incident">Incident</button>
-  <button class="ghost tab" id="tab-app">Robot UI</button>
+  <button class="ghost tab on" id="tab-incident">CVE Monitor</button>
   <button class="ghost tab" id="tab-tf">Agent</button>
 </header>
 <iframe id="appframe" src="about:blank" style="display:none;width:100%;height:calc(100vh - 62px);border:0"></iframe>
 <div id="incident" class="incident-view" style="display:none">
-  <div class="incident-top">
-    <article class="hero-card">
-      <div class="eyebrow">Physical SOC · Active incident</div>
-      <div class="severity" id="i-severity">WAITING</div>
-      <h3 id="i-cve">Waiting for incident</h3>
-      <p class="incident-summary" id="i-summary">TrueForge activity will appear here when an investigation begins.</p>
-      <div class="meta"><span>Service <b id="i-service">—</b></span><span>Source <b id="i-source">—</b></span><span>Fetched <b id="i-fetched">—</b></span><span>Monitor <b id="i-monitor">EVERY 1 MIN · STARTING</b></span></div>
-    </article>
-    <aside class="engine-card">
-      <div class="engine-title"><strong>TrueForge activity</strong><span class="live-dot">● LIVE EVIDENCE</span></div>
-      <div id="engine-events"></div>
-    </aside>
-  </div>
+  <section class="carousel">
+    <div class="carousel-head"><div><div class="eyebrow">Repository vulnerability stream</div><h2 style="margin:5px 0 0">Recently evaluated</h2></div>
+      <div class="carousel-nav"><span class="sha" id="finding-count">0 CVEs</span><button class="ghost" id="c-prev">←</button><button class="ghost" id="c-next">→</button></div></div>
+    <article class="carousel-card" id="c-card"><div class="empty">Waiting for first repository scan.</div></article>
+    <div class="carousel-dots" id="c-dots"></div>
+  </section>
   <section class="timeline-card">
     <div class="timeline-head"><h2>Incident response</h2><span class="sha" id="i-sha">NO COMMIT</span></div>
     <div class="stages" id="stages"></div>
     <div class="merge-lock" id="merge-lock"><span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small></div>
   </section>
-  <section class="findings"><div class="timeline-head"><h2>Recently evaluated</h2><span class="sha" id="finding-count">0 CVEs</span></div><div id="finding-list"><div class="empty">Waiting for first repository scan.</div></div></section>
 </div>
 <div id="tfwrap" style="display:none">
   <div id="tfnone" class="empty" style="padding:40px 20px">
@@ -687,7 +693,7 @@ function connectEvents(){
 }
 
 let appLoaded=false;
-let curTab='ctl';
+let curTab='incident';
 function showTab(which){
   const app=which==='app';
   const incident=which==='incident';
@@ -697,14 +703,13 @@ function showTab(which){
   $('#incident').style.display=incident?'block':'none';
   $('#appframe').style.display=app?'block':'none';
   $('#tfwrap').style.display=tf?'block':'none';
-  for(const [id,name] of [['tab-ctl','ctl'],['tab-incident','incident'],['tab-app','app'],['tab-tf','tf']])
-    $('#'+id).className='ghost tab'+(which===name?' on':'');
+  for(const [id,name] of [['tab-incident','incident'],['tab-tf','tf']]){
+    const tab=$('#'+id);if(tab)tab.className='ghost tab'+(which===name?' on':'');
+  }
   if(app&&!appLoaded){$('#appframe').src='http://127.0.0.1:7860/';appLoaded=true;}
   if(incident)refreshIncident();
   if(tf)syncAgentFrame();
 }
-$('#tab-ctl').onclick=()=>showTab('ctl');
-$('#tab-app').onclick=()=>showTab('app');
 $('#tab-incident').onclick=()=>showTab('incident');
 $('#tab-tf').onclick=()=>showTab('tf');
 
@@ -716,30 +721,13 @@ function evidenceState(value,doneValues=[]){
 }
 async function refreshIncident(){
   const s=await api('/api/incident');
-  $('#i-cve').textContent=s.cve||'Waiting for incident';
-  $('#i-summary').textContent=s.summary||'No active security advisory';
-  $('#i-service').textContent=s.service||'—';$('#i-source').textContent=s.source||'—';
-  $('#i-fetched').textContent=s.fetched_at||'—';$('#i-sha').textContent=s.commit?`COMMIT ${s.commit}`:'NO COMMIT';
+  $('#i-sha').textContent=s.commit?`COMMIT ${s.commit}`:'NO COMMIT';
   const monitor=s.monitor||{};
-  let monitorText=`EVERY ${Math.round((monitor.interval_seconds||60)/60)} MIN · ${(monitor.status||'starting').replaceAll('_',' ').toUpperCase()}`;
-  if(monitor.next_check_at){const left=Math.max(0,Math.ceil((Date.parse(monitor.next_check_at)-Date.now())/1000));monitorText+=` · NEXT ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;}
-  $('#i-monitor').textContent=monitorText;
   const findings=monitor.findings||[];
   $('#finding-count').textContent=`${findings.length} CVE${findings.length===1?'':'s'}`;
-  $('#finding-list').innerHTML=findings.length?findings.map(f=>`<div class="finding-row"><span class="finding-cve">${esc(f.cve)}</span><span class="finding-status ${f.status==='applicable'?'applicable':''}">${esc(f.status)}</span><span class="finding-reason">${esc(f.reason)}</span></div>`).join(''):'<div class="empty">Waiting for first repository scan.</div>';
-  const sev=(s.severity||'unknown').toUpperCase();$('#i-severity').textContent=sev;
-  $('#i-severity').style.visibility=sev==='UNKNOWN'?'hidden':'visible';
+  renderFinding(findings,monitor.incidents||[]);
   const tests=s.tests||{},q=s.qodo||{},approval=s.approval||{},merge=s.merge||{};
   const agents=s.subagents||[];
-  const events=[
-    ['MCP · Bright Data',s.fetched_at?'done':'locked',s.fetched_at?'source verified':'not started'],
-    ['Sandbox · isolated',evidenceState(tests.status,['passed']),tests.status||'not started'],
-    ['Subagents',agents.length>=2?'done':agents.length?'active':'locked',`${agents.length} returned`],
-    ['Session preserved',s.session_id?'done':'locked',s.session_id?String(s.session_id).slice(0,10):'no session'],
-    ['Qodo review',evidenceState(q.status,['passed','complete','approved']),q.status||'not started'],
-    ['Human approval',evidenceState(approval.status,['approved']),approval.status||'locked']
-  ];
-  $('#engine-events').innerHTML=events.map(([name,state,detail])=>`<div class="engine-event ${state}"><span class="event-icon">${state==='done'?'✓':state==='active'?'•':'—'}</span><span class="event-name">${esc(name)}</span><span class="event-detail">${esc(detail)}</span></div>`).join('');
   const testDone=tests.status==='passed',qDone=['passed','complete','approved'].includes(q.status);
   const items=[
     ['Detected',s.fetched_at?'done':'locked',s.source||'Awaiting MCP evidence',''],
@@ -757,6 +745,30 @@ async function refreshIncident(){
     '<span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small>';
 }
 
+let findingIndex=0,lastFindingCount=0;
+function renderFinding(findings,incidents){
+  if(!findings.length){$('#c-card').innerHTML='<div class="empty">Waiting for first repository scan.</div>';return;}
+  if(findings.length!==lastFindingCount){findingIndex=0;lastFindingCount=findings.length;}
+  findingIndex=(findingIndex+findings.length)%findings.length;
+  const f=findings[findingIndex],incident=incidents.find(x=>x.cve===f.cve)||{};
+  const applicable=f.status==='applicable';
+  const announced=!!(incident.discovery_announced||incident.announced);
+  const committed=!!incident.sha;
+  const reviewed=!!incident.qodo_reviewed_sha||['checkpoint_pending','approval_ready','merged'].includes(incident.status);
+  const approval=incident.status==='approval_ready'?'active':incident.status==='merged'?'done':'';
+  $('#c-card').className='carousel-card'+(applicable?' applicable':'');
+  $('#c-card').innerHTML=`<div class="carousel-title"><h3>${esc(f.cve)}</h3><span class="status-word ${applicable?'applicable':''}">${applicable?'APPLICABLE':'EVALUATED'}</span></div>
+    <p class="carousel-reason">${esc(f.reason)}</p><div class="badges">
+    <span class="badge ${announced?'done':''}">${announced?'✓ REACHY ANNOUNCED':'REACHY NOT NEEDED'}</span>
+    <span class="badge ${committed?'done':''}">${committed?'✓ PR COMMITTED':'NO PATCH COMMIT'}</span>
+    <span class="badge ${reviewed?'done':committed?'active':''}">${reviewed?'✓ QODO REVIEWED':committed?'QODO REVIEWING':'QODO NOT NEEDED'}</span>
+    <span class="badge ${approval}">${approval==='done'?'✓ MERGED':approval==='active'?'● AWAITING VOICE APPROVAL':'NO APPROVAL REQUIRED'}</span></div>`;
+  $('#c-dots').innerHTML=findings.map((_,i)=>`<span class="carousel-dot ${i===findingIndex?'on':''}"></span>`).join('');
+}
+$('#c-prev').onclick=()=>{findingIndex--;refreshIncident();};
+$('#c-next').onclick=()=>{findingIndex++;refreshIncident();};
+setInterval(()=>{if(curTab==='incident'&&lastFindingCount>1){findingIndex++;refreshIncident();}},6000);
+
 // Point the iframe straight at the live thread. TrueForge's own session VIEW
 // streams fine once open — it is only the sidebar that needs a page reload to
 // notice a new session. Following the id here removes that entirely.
@@ -769,7 +781,7 @@ function syncAgentFrame(){
   if(f.getAttribute('data-url')!==want){ f.setAttribute('data-url',want); f.src=want; }
 }
 
-refresh();refreshChat();connectEvents();
+refresh();refreshChat();connectEvents();showTab('incident');
 setInterval(refresh,4000);
 setInterval(()=>{if(!es)refreshChat();},3000);   // fallback only
 setInterval(refreshIncident,1500);
