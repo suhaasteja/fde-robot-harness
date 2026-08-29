@@ -176,9 +176,12 @@ not name**.
 
 ## Integrating with another TrueForge setup
 
-If you already run TrueForge with your own connectors (Qodo, a codebase, subagents),
-**you do not need any of this repo's code**. The robot is just another MCP
-connector. Point your TrueForge at it and attach it to any agent you already have.
+**→ See [INTEGRATE.md](INTEGRATE.md)** for the full walkthrough: setup, connector
+registration, the tool reference, the three failure modes that produce no error,
+and a troubleshooting table. Hand that file to a coding agent doing the integration.
+
+Short version: you do not need any of this repo's code. The robot is just another
+MCP connector. Point your TrueForge at it and attach it to any agent you already have.
 
 ### What this repo exposes
 
