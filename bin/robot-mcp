@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import subprocess
 import sys
+import threading
 
 import httpx
 try:
@@ -254,6 +256,35 @@ def set_volume(level: int) -> dict:
 APP_UI = "http://127.0.0.1:7860"
 
 
+def _system_say(text: str) -> dict:
+    """Speak through Reachy audio while an attention gesture remains active."""
+    stopped = threading.Event()
+
+    def animate() -> None:
+        # Recorded moves include coordinated head and antenna motion. Re-issue
+        # the gentle attentive move until speech ends so the body never freezes
+        # halfway through a long security briefing.
+        path = (
+            "/move/play/recorded-move-dataset/"
+            "pollen-robotics/reachy-mini-emotions-library/attentive2"
+        )
+        while not stopped.is_set():
+            _call("POST", path)
+            stopped.wait(7.0)
+
+    motion = threading.Thread(target=animate, name="reachy-speaking-motion", daemon=True)
+    motion.start()
+    try:
+        subprocess.run(["/usr/bin/say", text], timeout=30, check=True)
+        return {"ok": True, "spoken": text, "transport": "macos-voice"}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": "system_say_failed", "detail": str(error)[:300]}
+    finally:
+        stopped.set()
+        motion.join(timeout=2.0)
+        _call("POST", "/move/stop")
+
+
 @mcp.tool()
 def say(text: str, verbatim: bool = True) -> dict:
     """Make the robot say something out loud, in its own voice.
@@ -283,6 +314,8 @@ def say(text: str, verbatim: bool = True) -> dict:
                     json={"jsonrpc": "2.0", "id": "robot-mcp-say",
                           "method": "conversation.say", "params": {"text": rpc_text}},
                 )
+                if r.status_code == 404:
+                    return _system_say(text)
             if r.status_code == 503:
                 return {
                     "error": "not_connected",
@@ -295,10 +328,7 @@ def say(text: str, verbatim: bool = True) -> dict:
                 return {"error": "say_failed", "detail": result["error"]}
             return result.get("result", result)
     except httpx.ConnectError:
-        return {
-            "error": "app_unreachable",
-            "detail": "No conversation app on 127.0.0.1:7860. It must be running with --ui.",
-        }
+        return _system_say(text)
     except Exception as e:  # noqa: BLE001
         return {"error": type(e).__name__, "detail": str(e)[:300]}
 
