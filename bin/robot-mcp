@@ -172,16 +172,29 @@ def stop_moving() -> dict:
 # --- expressive moves ------------------------------------------------------
 
 
+# The daemon resolves these against HuggingFace, so they must be full repo ids,
+# not bare words -- "emotions" 404s as a nonexistent dataset.
+MOVE_LIBRARIES = {
+    "emotions": "pollen-robotics/reachy-mini-emotions-library",
+    "dances": "pollen-robotics/reachy-mini-dances-library",
+}
+
+
+def _resolve_library(dataset: str) -> str:
+    """Accept the friendly name or a full repo id."""
+    return MOVE_LIBRARIES.get(dataset.strip().lower(), dataset)
+
+
 @mcp.tool()
 def list_moves(dataset: str = "emotions") -> dict:
     """List the named moves available to play_move.
 
     Args:
-        dataset: which library to list — typically "emotions" or "dances".
+        dataset: "emotions" or "dances" (or a full HuggingFace repo id).
 
     Call this before play_move rather than guessing a move name.
     """
-    res = _call("GET", f"/move/recorded-move-datasets/list/{dataset}")
+    res = _call("GET", f"/move/recorded-move-datasets/list/{_resolve_library(dataset)}")
     if isinstance(res, list):
         return {"dataset": dataset, "moves": res}
     return res
@@ -198,7 +211,8 @@ def play_move(move_name: str, dataset: str = "emotions") -> dict:
     This is the expressive channel: use it to make the robot react visibly
     rather than only speaking.
     """
-    return _call("POST", f"/move/play/recorded-move-dataset/{dataset}/{move_name}")
+    lib = _resolve_library(dataset)
+    return _call("POST", f"/move/play/recorded-move-dataset/{lib}/{move_name}")
 
 
 # --- audio -----------------------------------------------------------------
