@@ -358,3 +358,42 @@ Do not submit until every answer is yes:
 - [ ] Does the final frame include product name, one-line promise, public repo URL, and team?
 - [ ] Has someone unfamiliar with the project watched it once and correctly described both
   the user value and why TrueForge—not merely an LLM—is essential?
+
+## Explicit shooting manifest
+
+Record these as separate clean clips so the editor can preserve authentic evidence while
+keeping the final film under three minutes.
+
+| Clip | Screen or camera | Must remain readable |
+|---|---|---|
+| 1 | Reachy hero camera shot | Robot movement, clean environment, no laptop glare |
+| 2 | Physical SOC **Incident** tab | CVE severity, affected service, six-stage timeline, `MERGE LOCKED` |
+| 3 | Native TrueForge session | TrueForge branding, session ID, Bright Data MCP call, public source and timestamp |
+| 4 | Native TrueForge sandbox activity | Generated patch, isolated-sandbox label, failing test before fix, passing suite after fix |
+| 5 | Native TrueForge subagent activity | Two distinct subagents and their decision-useful conclusions |
+| 6 | Native TrueForge persistence proof | Same session ID before and after browser refresh/reconnect |
+| 7 | Native TrueForge approval checkpoint | Exact pending action and commit SHA; execution visibly paused |
+| 8 | Native GitHub PR **Conversation** tab | PR number, Qodo initial review, meaningful finding, team reply |
+| 9 | Native GitHub PR **Files changed/Checks** | Corrective commit, Qodo follow-up review, successful final SHA |
+| 10 | Split shot: Reachy + Incident UI | Reachy speaking while `APPROVAL REQUIRED` and `MERGE LOCKED` remain visible |
+| 11 | Negative approval shot | Spoken denial in transcript; no state advances; merge stays locked |
+| 12 | Positive approval shot | Spoken exact SHA, TrueForge approval release, matching UI transition |
+| 13 | Native GitHub merged PR | Human merge, merged SHA identical to reviewed and spoken SHA |
+| 14 | Physical SOC audit card | Approver, exact words, CVE, SHA, tests, Qodo PR, timestamp |
+
+### Required screen order in the final edit
+
+```text
+Reachy cold open
+→ Incident UI: critical alert
+→ native TrueForge: MCP → sandbox → tests → subagents → reconnect → checkpoint
+→ native GitHub/Qodo: finding → fix → follow-up review on final SHA
+→ Incident UI + Reachy: deny → remain locked → explicitly retry → approve exact SHA
+→ native GitHub: merge
+→ Incident UI: immutable audit card + closing line
+```
+
+Never show Qodo as a generic logo or custom animation instead of its actual GitHub review.
+Never crop out the TrueForge session ID, GitHub PR number, or commit SHA. Use zoom callouts,
+not replacement graphics. Blur API keys, notifications, usernames not needed for the story,
+local filesystem paths, and browser profile details before export.

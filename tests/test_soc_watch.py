@@ -56,6 +56,22 @@ class ApprovalGateTests(unittest.TestCase):
         self.assertEqual(state["approval"]["status"], "locked")
         self.assertFalse(state["approval"]["prerequisites"]["qodo_followup"])
 
+    def test_voice_approval_requires_exact_commit(self):
+        self.assertEqual(
+            soc_watch.classify_decision("I approve commit 7f3a21c", "7f3a21c"),
+            "approved",
+        )
+        self.assertEqual(
+            soc_watch.classify_decision("I approve the patch", "7f3a21c"),
+            "ambiguous",
+        )
+
+    def test_denial_always_wins(self):
+        self.assertEqual(
+            soc_watch.classify_decision("No, hold commit 7f3a21c", "7f3a21c"),
+            "denied",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

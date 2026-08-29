@@ -19,11 +19,38 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = ROOT / ".run" / "incident.json"
 TRUEFORGE = os.getenv("TRUEFORGE_BASE_URL", "http://localhost:8790").rstrip("/")
+LOG_FILE = ROOT / "logs" / "app.log"
+TRANSCRIPT_RE = re.compile(r"role=user(?!_partial) content=(.*)$")
+
+
+def classify_decision(text: str, commit: str) -> str:
+    """Require an unambiguous verb and the exact reviewed short SHA."""
+    normalized = " ".join(text.lower().split())
+    if any(word in normalized for word in ("deny", "reject", "hold", "do not approve", "don't approve", "no")):
+        return "denied"
+    sha = commit.lower().strip()
+    if sha and sha in normalized and any(phrase in normalized for phrase in ("i approve", "approve commit", "approved commit")):
+        return "approved"
+    return "ambiguous"
+
+
+def latest_user_decision(commit: str) -> tuple[str, str] | None:
+    try:
+        lines = LOG_FILE.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        match = TRANSCRIPT_RE.search(line)
+        if match:
+            words = match.group(1).strip()
+            return classify_decision(words, commit), words
+    return None
 
 
 def get_json(url: str) -> dict:
@@ -174,6 +201,29 @@ def enforce_gate(state: dict) -> None:
         state.setdefault("merge", {})["status"] = "locked"
 
 
+def sync_voice_decision(state: dict) -> None:
+    approval = state.setdefault("approval", {})
+    if approval.get("status") != "waiting":
+        return
+    result = latest_user_decision(str(state.get("commit") or ""))
+    if not result:
+        return
+    decision, words = result
+    approval["last_words"] = words
+    approval["decision"] = decision
+    if decision == "approved":
+        approval["status"] = "approved"
+        state.setdefault("audit", {})["approval"] = {
+            "words": words,
+            "commit": state.get("commit"),
+            "cve": state.get("cve"),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    elif decision == "denied":
+        approval["status"] = "denied"
+        state.setdefault("merge", {})["status"] = "locked"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", help="TrueForge session id")
@@ -191,6 +241,7 @@ def main() -> None:
         if args.pr:
             sync_qodo(state, args.pr)
         enforce_gate(state)
+        sync_voice_decision(state)
         atomic_write(state)
         print(json.dumps({"session": state.get("session_id"), "qodo": state.get("qodo")}, indent=2))
         if args.once:
