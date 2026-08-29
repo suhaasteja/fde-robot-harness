@@ -17,6 +17,8 @@ RUN_DIR="$REPO_ROOT/.run"
 LOG_DIR="$REPO_ROOT/logs"
 PID_FILE="$RUN_DIR/app.pid"
 LOG_FILE="$LOG_DIR/app.log"
+DAEMON_PID_FILE="$RUN_DIR/daemon.pid"
+DAEMON_LOG="$LOG_DIR/daemon.log"
 
 CONTROL_VENV_PY="$HOME/Library/Application Support/com.pollen-robotics.reachy-mini/.venv/bin/python3"
 
@@ -195,6 +197,61 @@ cmd_doctor() {
   fi
 }
 
+cmd_daemon_start() {
+  # The Control app is just a GUI wrapper around this same daemon -- the SDK
+  # ships it as a console script, so the terminal path needs no GUI at all.
+  # Only ever run ONE daemon; two fighting over the serial port and :8000 is a
+  # confusing mess to debug.
+  if daemon_up; then
+    warn "A daemon is already listening on :8000 -- not starting a second one."
+    dim "  If that's the Control app, quit it first, or just use it as-is."
+    return 0
+  fi
+
+  local dpid
+  if [ -f "$DAEMON_PID_FILE" ] && dpid="$(cat "$DAEMON_PID_FILE")" && kill -0 "$dpid" 2>/dev/null; then
+    warn "Daemon already tracked as pid $dpid."
+    return 0
+  fi
+
+  "$VENV/bin/reachy-mini-daemon" --desktop-app-daemon --no-wake-up-on-start "$@" \
+      >>"$DAEMON_LOG" 2>&1 &
+  local newpid=$!
+  echo "$newpid" >"$DAEMON_PID_FILE"
+
+  local i
+  for i in $(seq 1 40); do
+    daemon_up && { ok "Daemon started (pid $newpid)"; dim "  logs: $DAEMON_LOG"; return 0; }
+    kill -0 "$newpid" 2>/dev/null || break
+    sleep 0.5
+  done
+
+  err "Daemon did not come up on :8000. Last lines:"
+  tail -n 15 "$DAEMON_LOG" >&2
+  rm -f "$DAEMON_PID_FILE"
+  exit 1
+}
+
+cmd_daemon_stop() {
+  local dpid
+  if [ ! -f "$DAEMON_PID_FILE" ] || ! dpid="$(cat "$DAEMON_PID_FILE")" || ! kill -0 "$dpid" 2>/dev/null; then
+    warn "No harness-started daemon to stop."
+    dim "  A daemon from the Control app must be quit via the Control app."
+    rm -f "$DAEMON_PID_FILE"
+    return 0
+  fi
+
+  kill -TERM "$dpid" 2>/dev/null
+  local i
+  for i in $(seq 1 20); do
+    kill -0 "$dpid" 2>/dev/null || { ok "Daemon stopped (pid $dpid)"; rm -f "$DAEMON_PID_FILE"; return 0; }
+    sleep 0.5
+  done
+  kill -KILL "$dpid" 2>/dev/null
+  rm -f "$DAEMON_PID_FILE"
+  ok "Daemon killed (pid $dpid)"
+}
+
 cmd_panel() {
   # The app only serves its personality API when started with --ui, so the
   # prompt editor stays greyed out otherwise. Volume and transcript work either way.
@@ -221,6 +278,8 @@ usage: $(basename "$0") <command> [-- app args]
   doctor         Verify pins and report whether the dashboard is usable yet
   logs           Follow the log file
   panel          Web control panel: prompt, transcript, volume, memory
+  daemon [args]  Start the daemon yourself, instead of via Control.app
+  daemon-stop    Stop a harness-started daemon
 
 Extra args pass through to the app, e.g.:
   $(basename "$0") start --no-camera
@@ -239,6 +298,8 @@ case "${1:-}" in
   doctor)  cmd_doctor ;;
   logs)    cmd_logs ;;
   panel)   shift; cmd_panel "$@" ;;
+  daemon)  shift; cmd_daemon_start "$@" ;;
+  daemon-stop) cmd_daemon_stop ;;
   ""|-h|--help|help) usage ;;
   *) err "Unknown command: $1"; echo; usage; exit 1 ;;
 esac

@@ -1,4 +1,4 @@
-.PHONY: start stop restart status doctor logs panel help
+.PHONY: start stop restart status doctor logs panel daemon daemon-stop help
 
 help:
 	@bin/reachy-app help
@@ -23,3 +23,9 @@ logs:
 
 panel:
 	@bin/reachy-app panel
+
+daemon:
+	@bin/reachy-app daemon
+
+daemon-stop:
+	@bin/reachy-app daemon-stop
