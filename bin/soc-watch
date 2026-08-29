@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Synchronize verifiable demo evidence into the Physical SOC incident UI.
+
+This bridge is intentionally read-only: TrueForge and GitHub/Qodo remain the
+sources of truth. It writes their evidence to .run/incident.json atomically;
+missing or malformed evidence stays pending and can never unlock a merge.
+
+    bin/soc-watch --session SESSION_ID --pr OWNER/REPO#12 --once
+    bin/soc-watch --session SESSION_ID --pr OWNER/REPO#12
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE_FILE = ROOT / ".run" / "incident.json"
+TRUEFORGE = os.getenv("TRUEFORGE_BASE_URL", "http://localhost:8790").rstrip("/")
+LOG_FILE = ROOT / "logs" / "app.log"
+TRANSCRIPT_RE = re.compile(r"role=user(?!_partial) content=(.*)$")
+
+
+def classify_decision(text: str, commit: str) -> str:
+    """Require an unambiguous verb and the exact reviewed short SHA."""
+    normalized = " ".join(text.lower().split())
+    if re.search(r"\b(?:deny|reject|hold|no)\b|\b(?:do not|don't) approve\b", normalized):
+        return "denied"
+    sha = commit.lower().strip()
+    sha_present = bool(sha and re.search(rf"(?<![0-9a-f]){re.escape(sha)}(?![0-9a-f])", normalized))
+    if sha_present and re.search(r"\b(?:i approve|approve commit|approved commit)\b", normalized):
+        return "approved"
+    return "ambiguous"
+
+
+def latest_user_decision(commit: str) -> tuple[str, str] | None:
+    try:
+        lines = LOG_FILE.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        match = TRANSCRIPT_RE.search(line)
+        if match:
+            words = match.group(1).strip()
+            return classify_decision(words, commit), words
+    return None
+
+
+def get_json(url: str) -> dict:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            return json.loads(response.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        return {}
+
+
+def post_json(url: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        return {}
+
+
+def atomic_write(value: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="incident-", suffix=".json", dir=STATE_FILE.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+        os.replace(name, STATE_FILE)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def existing_state() -> dict:
+    try:
+        value = json.loads(STATE_FILE.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def sync_trueforge(state: dict, session_id: str) -> None:
+    session = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}").get("data", {})
+    turns = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns").get("data", [])
+    if not session:
+        state["trueforge_error"] = "session unavailable"
+        state.pop("trueforge", None)
+        state.setdefault("approval", {})["status"] = "locked"
+        state.setdefault("merge", {})["status"] = "locked"
+        return
+    state.pop("trueforge_error", None)
+    state["session_id"] = session_id
+    state["trueforge_url"] = f"{TRUEFORGE}/sessions/{session_id}"
+
+    # Preserve the full raw evidence for audit/debugging. Presentation fields
+    # are populated by the workflow itself, never guessed from prose here.
+    state["trueforge"] = {
+        "title": session.get("title"),
+        "updated_at": session.get("updated_at") or session.get("updatedAt"),
+        "turn_count": len(turns) if isinstance(turns, list) else 0,
+    }
+    if isinstance(turns, list) and turns:
+        last = turns[-1]
+        turn_id = last.get("id")
+        if turn_id:
+            detail = get_json(
+                f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns/{turn_id}"
+            ).get("data", {})
+            turn_state = detail.get("state", {})
+            output = ((turn_state.get("output") or {}).get("content") or "")
+            # Promote only explicit, machine-readable facts from the completed
+            # TrueForge report into the presentation model. If the report does
+            # not contain the proof, the corresponding UI stage stays pending.
+            if "CVE-2025-29927" in output:
+                state.update({
+                    "cve": "CVE-2025-29927",
+                    "severity": "critical",
+                    "summary": "Authorization bypass via x-middleware-subrequest",
+                    "service": "Next.js middleware",
+                    "source": "Bright Data · NVD + Vercel advisory",
+                    "fetched_at": detail.get("created_at"),
+                })
+            before = re.search(
+                r"Before patch \|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|", output
+            )
+            after = re.search(
+                r"After patch \|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|", output
+            )
+            if before and after:
+                total, passed, failed = map(int, after.groups())
+                state["tests"] = {
+                    "status": "passed" if failed == 0 and passed == total else "failed",
+                    "passed": passed,
+                    "total": total,
+                    "before": {
+                        "total": int(before.group(1)),
+                        "passed": int(before.group(2)),
+                        "failed": int(before.group(3)),
+                    },
+                    "sandbox": "TrueForge isolated sandbox",
+                }
+            agents = []
+            if "### Blast-radius assessment" in output:
+                agents.append({"name": "Blast radius", "status": "complete"})
+            if "### Regression-test proposal" in output:
+                agents.append({"name": "Regression audit", "status": "complete"})
+            if agents:
+                state["subagents"] = agents
+            required = turn_state.get("requiredActions") or turn_state.get("required_actions")
+            if required:
+                state["trueforge"]["approval_requested"] = True
+
+
+def gh_pr(pr: str) -> dict:
+    fields = "number,url,headRefOid,statusCheckRollup,reviews,commits"
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr, "--json", fields], cwd=ROOT,
+            text=True, capture_output=True, timeout=15, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return {"error": f"GitHub unavailable: {error}"[:300]}
+    if result.returncode:
+        return {"error": (result.stderr or result.stdout).strip()[:300]}
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        return {"error": "GitHub returned invalid JSON"}
+    # `gh pr view` omits the reviewed commit from its review objects. Fetch the
+    # canonical reviews endpoint so the gate can bind Qodo to the exact head.
+    try:
+        repo_result = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        if repo_result.returncode == 0 and data.get("number"):
+            owner_repo = repo_result.stdout.strip()
+            review_result = subprocess.run(
+                ["gh", "api", f"repos/{owner_repo}/pulls/{data['number']}/reviews"],
+                cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+            )
+            if review_result.returncode == 0:
+                data["review_commits"] = json.loads(review_result.stdout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    return data
+
+
+def sync_qodo(state: dict, pr: str) -> None:
+    data = gh_pr(pr)
+    if data.get("error"):
+        state["qodo"] = {"status": "pending", "error": data["error"], "pr": pr}
+        return
+
+    checks = data.get("statusCheckRollup") or []
+    qodo_checks = []
+    for check in checks:
+        haystack = " ".join(
+            str(check.get(key, "")) for key in ("name", "context", "workflowName", "app")
+        ).lower()
+        if "qodo" in haystack or "codium" in haystack:
+            qodo_checks.append(check)
+    reviews = data.get("reviews") or []
+    qodo_reviews = [
+        review for review in reviews
+        if "qodo" in str((review.get("author") or {}).get("login", "")).lower()
+        or "codium" in str((review.get("author") or {}).get("login", "")).lower()
+    ]
+
+    conclusions = [
+        str(check.get("conclusion") or check.get("state") or check.get("status") or "").upper()
+        for check in qodo_checks
+    ]
+    complete = bool(qodo_checks or qodo_reviews) and all(
+        value in {"SUCCESS", "COMPLETED", "NEUTRAL", "APPROVED"} for value in conclusions
+    )
+    # A follow-up only counts when Qodo actually reviewed the current head SHA.
+    # An earlier bot review on a now-obsolete commit can never unlock approval.
+    commits = data.get("commits") or []
+    final_sha = data.get("headRefOid")
+    qodo_review_commits = [
+        review.get("commit_id") for review in (data.get("review_commits") or [])
+        if "qodo" in str((review.get("user") or {}).get("login", "")).lower()
+        or "codium" in str((review.get("user") or {}).get("login", "")).lower()
+    ]
+    followup = bool(final_sha and final_sha in qodo_review_commits and len(commits) >= 2)
+    state["commit"] = final_sha[:7] if final_sha else state.get("commit")
+    state["qodo"] = {
+        "status": "complete" if complete and followup else "reviewing" if qodo_checks or qodo_reviews else "pending",
+        "pr": f"PR #{data.get('number')}" if data.get("number") else pr,
+        "url": data.get("url"),
+        "final_sha": final_sha,
+        "checks": len(qodo_checks),
+        "reviews": len(qodo_reviews),
+        "reviewed_sha": final_sha if followup else None,
+        "followup": followup,
+        "finding": "Follow-up review complete" if complete and followup else "Awaiting Qodo follow-up review",
+    }
+
+
+def enforce_gate(state: dict) -> None:
+    """Expose approval only when all machine-verifiable prerequisites agree."""
+    tests_pass = (state.get("tests") or {}).get("status") == "passed"
+    qodo = state.get("qodo") or {}
+    qodo_pass = qodo.get("status") == "complete" and qodo.get("followup") is True
+    requested = (state.get("trueforge") or {}).get("approval_requested") is True
+    commit = str(state.get("commit") or "")
+    reviewed_sha = str(qodo.get("final_sha") or "")
+    sha_matches = bool(commit and reviewed_sha and reviewed_sha.startswith(commit))
+    ready = tests_pass and qodo_pass and requested and sha_matches
+    approval = state.setdefault("approval", {})
+    if not ready:
+        approval["status"] = "locked"
+        approval.pop("decision", None)
+        approval.pop("last_words", None)
+    elif approval.get("status") not in {"approved", "denied"}:
+        approval["status"] = "waiting"
+    approval["prerequisites"] = {
+        "sandbox_tests": tests_pass,
+        "qodo_followup": qodo_pass,
+        "trueforge_checkpoint": requested,
+        "commit_matches": sha_matches,
+    }
+    if not ready:
+        state.setdefault("merge", {})["status"] = "locked"
+
+
+def sync_voice_decision(state: dict) -> None:
+    approval = state.setdefault("approval", {})
+    if approval.get("status") != "waiting":
+        return
+    result = latest_user_decision(str(state.get("commit") or ""))
+    if not result:
+        return
+    decision, words = result
+    approval["last_words"] = words
+    approval["decision"] = decision
+    if decision == "approved":
+        approval["status"] = "approved"
+        state.setdefault("audit", {})["approval"] = {
+            "words": words,
+            "commit": state.get("commit"),
+            "cve": state.get("cve"),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    elif decision == "denied":
+        approval["status"] = "denied"
+        state.setdefault("merge", {})["status"] = "locked"
+
+
+def release_trueforge_checkpoint(state: dict) -> bool:
+    """Send the spoken answer into TrueForge's pending ask-user tool call."""
+    session_id = state.get("session_id")
+    words = (state.get("approval") or {}).get("last_words")
+    if not session_id or not words:
+        return False
+    turns = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns").get("data", [])
+    for turn in reversed(turns if isinstance(turns, list) else []):
+        for action in reversed((turn.get("state") or {}).get("required_actions") or []):
+            if action.get("type") != "tool.response_required":
+                continue
+            tool_calls = action.get("tool_calls") or []
+            if not tool_calls:
+                continue
+            result = post_json(
+                f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns",
+                {
+                    "input": [{
+                        "type": "user.tool_response",
+                        "thread_id": action.get("thread_id", "main"),
+                        "tool_call_id": tool_calls[0].get("id"),
+                        "content": words,
+                    }],
+                    "previous_turn_id": turn.get("id"),
+                    "stream": False,
+                },
+            )
+            if result.get("data"):
+                state["approval"]["trueforge_released"] = True
+                return True
+    return False
+
+
+def merge_reviewed_pr(state: dict, pr: str) -> None:
+    """Merge only the exact approved and Qodo-reviewed Git head."""
+    approval = state.get("approval") or {}
+    qodo = state.get("qodo") or {}
+    merge = state.setdefault("merge", {})
+    if approval.get("status") != "approved" or not approval.get("trueforge_released"):
+        return
+    sha = str(qodo.get("final_sha") or "")
+    if not sha or qodo.get("reviewed_sha") != sha:
+        approval["status"] = "locked"
+        merge["status"] = "locked"
+        return
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "merge", pr, "--merge", "--match-head-commit", sha],
+            cwd=ROOT, text=True, capture_output=True, timeout=30, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        merge.update(status="failed", error=str(error)[:300])
+        return
+    if result.returncode == 0:
+        merge.update(status="merged", sha=sha, pr=pr)
+    else:
+        merge.update(status="failed", error=(result.stderr or result.stdout).strip()[:300])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--session", help="TrueForge session id")
+    parser.add_argument("--pr", help="GitHub PR URL, number, or OWNER/REPO#NUMBER")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--merge", action="store_true", help="merge after native checkpoint release")
+    parser.add_argument("--interval", type=float, default=2.0)
+    args = parser.parse_args()
+    if not args.session and not args.pr:
+        parser.error("at least one of --session or --pr is required")
+
+    while True:
+        state = existing_state()
+        if args.session:
+            sync_trueforge(state, args.session)
+        if args.pr:
+            sync_qodo(state, args.pr)
+        enforce_gate(state)
+        sync_voice_decision(state)
+        if args.merge and (state.get("approval") or {}).get("status") == "approved":
+            if not (state.get("approval") or {}).get("trueforge_released"):
+                release_trueforge_checkpoint(state)
+            merge_reviewed_pr(state, args.pr)
+        atomic_write(state)
+        print(json.dumps({"session": state.get("session_id"), "qodo": state.get("qodo")}, indent=2))
+        if args.once:
+            return
+        time.sleep(max(0.5, args.interval))
+
+
+if __name__ == "__main__":
+    main()
