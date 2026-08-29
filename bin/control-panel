@@ -31,9 +31,33 @@ from pathlib import Path
 DAEMON = "http://127.0.0.1:8000"
 APP_UI = "http://127.0.0.1:7860"
 
-# The app's routes are under /api/v1 (the daemon's are under /api). Its
-# "no custom profile" sentinel is a literal display string, not "Default".
+# The app's "no custom profile" sentinel is a literal display string, not "Default".
 DEFAULT_PERSONALITY = "(built-in default)"
+
+# The app's route prefix moved between releases: v0.8.0 (Gradio UI) serves them
+# at the root, v0.10.0 under /api/v1. Probe rather than hardcode, so the panel
+# works across the versions we actually switch between. The daemon is separate
+# and always /api.
+_APP_PREFIX: str | None = None
+
+
+def app_prefix() -> str | None:
+    """Return the app's API prefix, probing once and caching the result."""
+    global _APP_PREFIX
+    if _APP_PREFIX is not None:
+        return _APP_PREFIX or None
+    for candidate in ("/api/v1", ""):
+        ok, _ = fetch(f"{APP_UI}{candidate}/personalities", timeout=1.5)
+        if ok:
+            _APP_PREFIX = candidate
+            return candidate
+    return None
+
+
+def reset_app_prefix() -> None:
+    """Forget the cached prefix, so a restarted app on a different version re-probes."""
+    global _APP_PREFIX
+    _APP_PREFIX = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = REPO_ROOT / "logs" / "app.log"
@@ -141,8 +165,7 @@ def clear_memory():
 
 
 def app_ui_up() -> bool:
-    ok, _ = fetch(f"{APP_UI}/api/v1/personalities", timeout=1.5)
-    return ok
+    return app_prefix() is not None
 
 
 # --- request handling ------------------------------------------------------
@@ -187,15 +210,16 @@ class Handler(BaseHTTPRequestHandler):
                 "memory": read_memory(),
             }
             if ui:
-                ok_p, pers = fetch(f"{APP_UI}/api/v1/personalities")
+                pfx = app_prefix() or ""
+                ok_p, pers = fetch(f"{APP_UI}{pfx}/personalities")
                 if ok_p:
                     state["personalities"] = pers.get("choices", [])
                     state["current_personality"] = pers.get("current")
                     state["locked"] = pers.get("locked", False)
-                ok_vc, cur = fetch(f"{APP_UI}/api/v1/voices/current")
+                ok_vc, cur = fetch(f"{APP_UI}{pfx}/voices/current")
                 if ok_vc:
                     state["voice"] = cur.get("voice") if isinstance(cur, dict) else cur
-                ok_mu, mu = fetch(f"{APP_UI}/api/v1/mic")
+                ok_mu, mu = fetch(f"{APP_UI}{pfx}/mic")
                 if ok_mu:
                     state["muted"] = mu.get("muted", False)
             return self._send(state)
@@ -209,12 +233,14 @@ class Handler(BaseHTTPRequestHandler):
                 from urllib.parse import parse_qs, urlparse
 
                 name = parse_qs(urlparse(self.path).query).get("name", [DEFAULT_PERSONALITY])[0]
-            ok, data = fetch(f"{APP_UI}/api/v1/personalities/load?name={urllib.request.quote(name)}")
+            pfx = app_prefix() or ""
+            ok, data = fetch(f"{APP_UI}{pfx}/personalities/load?name={urllib.request.quote(name)}")
             return self._send(data if ok else {"error": data.get("error", "app UI unavailable")},
                               200 if ok else 502)
 
         if p == "/api/voices":
-            ok, data = fetch(f"{APP_UI}/api/v1/voices")
+            pfx = app_prefix() or ""
+            ok, data = fetch(f"{APP_UI}{pfx}/voices")
             return self._send({"voices": data if ok else []})
 
         return self._send({"error": "not found"}, 404)
@@ -238,7 +264,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/mute":
             # App-level mute, distinct from the daemon's mic gain above.
-            ok, data = fetch(f"{APP_UI}/api/v1/mic", "POST", {"muted": bool(payload.get("muted"))})
+            pfx = app_prefix() or ""
+            ok, data = fetch(f"{APP_UI}{pfx}/mic", "POST", {"muted": bool(payload.get("muted"))})
             return self._send(data, 200 if ok else 502)
 
         if p == "/api/test-sound":
@@ -258,10 +285,11 @@ class Handler(BaseHTTPRequestHandler):
                 "tools_text": payload.get("tools_text", ""),
                 "voice": payload.get("voice"),
             }
-            ok, data = fetch(f"{APP_UI}/api/v1/personalities/save", "POST", save)
+            pfx = app_prefix() or ""
+            ok, data = fetch(f"{APP_UI}{pfx}/personalities/save", "POST", save)
             if not ok or not data.get("ok"):
                 return self._send({"ok": False, "error": data.get("error", "save failed")}, 502)
-            ok2, applied = fetch(f"{APP_UI}/api/v1/personalities/apply", "POST",
+            ok2, applied = fetch(f"{APP_UI}{pfx}/personalities/apply", "POST",
                                  {"name": data.get("value"), "persist": True})
             return self._send({"ok": ok2, "value": data.get("value"), "applied": applied})
 
