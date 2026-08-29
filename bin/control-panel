@@ -65,6 +65,7 @@ def reset_app_prefix() -> None:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = REPO_ROOT / "logs" / "app.log"
 MEMORY_FILE = Path.home() / ".local/share/reachy_mini_conversation_app/memory.v1.json"
+INCIDENT_FILE = REPO_ROOT / ".run" / "incident.json"
 
 # 2026-08-29 10:30:33,245 INFO ...console:885 | role=assistant content=Hi there
 LOG_RE = re.compile(
@@ -171,6 +172,42 @@ def app_ui_up() -> bool:
     return app_prefix() is not None
 
 
+def read_incident():
+    """Read the presentation state emitted by the SOC workflow.
+
+    The UI never invents successful work: absent evidence is explicitly pending.
+    soc-watch/TrueForge integration can atomically replace this JSON file as the
+    incident advances without coupling the panel to a volatile upstream schema.
+    """
+    state = {
+        "cve": "Waiting for incident",
+        "severity": "unknown",
+        "summary": "No active security advisory",
+        "service": "—",
+        "source": "—",
+        "fetched_at": None,
+        "session_id": None,
+        "commit": None,
+        "tests": {"status": "pending", "passed": 0, "total": 0},
+        "subagents": [],
+        "qodo": {"status": "pending", "pr": None, "finding": None, "followup": False},
+        "approval": {"status": "locked", "approver": None},
+        "merge": {"status": "locked"},
+    }
+    if INCIDENT_FILE.exists():
+        try:
+            incoming = json.loads(INCIDENT_FILE.read_text())
+            if isinstance(incoming, dict):
+                for key, value in incoming.items():
+                    if key in state and isinstance(state[key], dict) and isinstance(value, dict):
+                        state[key].update(value)
+                    else:
+                        state[key] = value
+        except Exception as e:
+            state["state_error"] = str(e)
+    return state
+
+
 # --- request handling ------------------------------------------------------
 
 
@@ -229,6 +266,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/transcript":
             return self._send({"turns": read_transcript()})
+
+        if p == "/api/incident":
+            return self._send(read_incident())
 
         if p == "/api/events":
             # Relay the app's SSE stream so the page can subscribe same-origin
@@ -372,6 +412,44 @@ button:disabled{opacity:.45;cursor:not-allowed}
   border:1px solid #2c3143;padding:10px 18px;border-radius:9px;opacity:0;transition:opacity .25s;
   pointer-events:none;font-size:13px}
 #toast.show{opacity:1}
+.incident-view{padding:24px;max-width:1440px;margin:0 auto}
+.incident-top{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,.8fr);gap:18px}
+.hero-card{background:linear-gradient(145deg,#171b27,#11141d);border:1px solid #292f40;
+  border-radius:18px;padding:26px;min-height:250px;position:relative;overflow:hidden}
+.hero-card:after{content:"";position:absolute;width:260px;height:260px;border-radius:50%;right:-100px;
+  top:-130px;background:radial-gradient(circle,rgba(239,68,68,.16),transparent 68%)}
+.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:#8992a7;font-weight:700}
+.severity{display:inline-flex;align-items:center;gap:8px;margin:20px 0 8px;padding:6px 10px;
+  border:1px solid #4b2530;background:#29151c;color:#fb7185;border-radius:8px;font-size:11px;
+  font-weight:800;letter-spacing:1px}
+.severity:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 12px currentColor}
+.hero-card h3{font-size:34px;line-height:1.05;margin:4px 0 10px;letter-spacing:-1.2px}
+.incident-summary{font-size:16px;color:#bbc2d2;max-width:720px;margin:0 0 24px}
+.meta{display:flex;gap:22px;flex-wrap:wrap;color:#7f899f;font-size:12px}.meta b{color:#d9deea;font-weight:600}
+.engine-card{background:#151823;border:1px solid #292f40;border-radius:18px;padding:22px}
+.engine-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px}
+.engine-title strong{font-size:14px}.live-dot{color:#60a5fa;font-size:11px}
+.engine-event{display:grid;grid-template-columns:22px 1fr auto;gap:10px;align-items:center;padding:11px 0;
+  border-top:1px solid #232838}.engine-event:first-of-type{border-top:0}
+.event-icon{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#202536;color:#69748c;font-size:11px}
+.engine-event.done .event-icon{background:#102d21;color:#4ade80}.engine-event.active .event-icon{background:#132949;color:#60a5fa}
+.engine-event.locked .event-icon{background:#302310;color:#fbbf24}.event-name{font-weight:600;font-size:12px}
+.event-detail{font-size:10px;color:#788298;text-align:right;max-width:110px;overflow:hidden;text-overflow:ellipsis}
+.timeline-card{margin-top:18px;background:#151823;border:1px solid #292f40;border-radius:18px;padding:22px}
+.timeline-head{display:flex;justify-content:space-between;align-items:end;margin-bottom:16px}
+.timeline-head h2{margin:0}.sha{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:#8b95aa}
+.stages{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+.stage{min-height:142px;background:#10131b;border:1px solid #252a39;border-radius:12px;padding:14px;position:relative}
+.stage-num{font-size:10px;color:#647087}.stage h4{font-size:12px;margin:20px 0 7px}.stage p{font-size:11px;color:#778197;margin:0}
+.stage.done{border-color:#244735;background:#101c18}.stage.done h4{color:#86efac}
+.stage.active{border-color:#684f20;background:#211b10;box-shadow:0 0 0 1px rgba(251,191,36,.08)}
+.stage.active h4{color:#fbbf24}.stage.failed{border-color:#572936;background:#241318}.stage.failed h4{color:#fb7185}
+.progress{height:5px;background:#242938;border-radius:5px;margin-top:14px;overflow:hidden}.progress span{display:block;height:100%;background:#4ade80}
+.review-box{margin-top:10px;font-size:10px;padding:7px;border-radius:7px;background:#181c28;color:#9ca6bb}
+.merge-lock{margin-top:16px;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;
+  border-radius:12px;background:#211b10;border:1px solid #684f20;color:#fbbf24;font-weight:700}
+.merge-lock.approved{background:#101f18;border-color:#28583d;color:#4ade80}
+@media(max-width:1000px){.incident-top{grid-template-columns:1fr}.stages{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <header>
   <h1>Reachy Mini</h1>
@@ -381,9 +459,30 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <span class="pill" id="p-dev"></span>
   <span style="flex:1"></span>
   <button class="ghost tab on" id="tab-ctl">Control</button>
+  <button class="ghost tab" id="tab-incident">Incident</button>
   <button class="ghost tab" id="tab-app">Robot UI</button>
 </header>
 <iframe id="appframe" src="about:blank" style="display:none;width:100%;height:calc(100vh - 62px);border:0"></iframe>
+<div id="incident" class="incident-view" style="display:none">
+  <div class="incident-top">
+    <article class="hero-card">
+      <div class="eyebrow">Physical SOC · Active incident</div>
+      <div class="severity" id="i-severity">WAITING</div>
+      <h3 id="i-cve">Waiting for incident</h3>
+      <p class="incident-summary" id="i-summary">TrueForge activity will appear here when an investigation begins.</p>
+      <div class="meta"><span>Service <b id="i-service">—</b></span><span>Source <b id="i-source">—</b></span><span>Fetched <b id="i-fetched">—</b></span></div>
+    </article>
+    <aside class="engine-card">
+      <div class="engine-title"><strong>TrueForge activity</strong><span class="live-dot">● LIVE EVIDENCE</span></div>
+      <div id="engine-events"></div>
+    </aside>
+  </div>
+  <section class="timeline-card">
+    <div class="timeline-head"><h2>Incident response</h2><span class="sha" id="i-sha">NO COMMIT</span></div>
+    <div class="stages" id="stages"></div>
+    <div class="merge-lock" id="merge-lock"><span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small></div>
+  </section>
+</div>
 <main>
   <div>
     <section>
@@ -552,18 +651,66 @@ function connectEvents(){
 let appLoaded=false;
 function showTab(which){
   const app=which==='app';
-  document.querySelector('main').style.display=app?'none':'grid';
+  const incident=which==='incident';
+  document.querySelector('main').style.display=(app||incident)?'none':'grid';
+  $('#incident').style.display=incident?'block':'none';
   $('#appframe').style.display=app?'block':'none';
   $('#tab-app').className='ghost tab'+(app?' on':'');
-  $('#tab-ctl').className='ghost tab'+(app?'':' on');
+  $('#tab-incident').className='ghost tab'+(incident?' on':'');
+  $('#tab-ctl').className='ghost tab'+(!app&&!incident?' on':'');
   if(app&&!appLoaded){$('#appframe').src='http://127.0.0.1:7860/';appLoaded=true;}
+  if(incident)refreshIncident();
 }
 $('#tab-ctl').onclick=()=>showTab('ctl');
 $('#tab-app').onclick=()=>showTab('app');
+$('#tab-incident').onclick=()=>showTab('incident');
+
+const esc=s=>String(s==null?'—':s).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function evidenceState(value,doneValues=[]){
+  if(doneValues.includes(value))return 'done';
+  if(['running','reviewing','pending_approval'].includes(value))return 'active';
+  return 'locked';
+}
+async function refreshIncident(){
+  const s=await api('/api/incident');
+  $('#i-cve').textContent=s.cve||'Waiting for incident';
+  $('#i-summary').textContent=s.summary||'No active security advisory';
+  $('#i-service').textContent=s.service||'—';$('#i-source').textContent=s.source||'—';
+  $('#i-fetched').textContent=s.fetched_at||'—';$('#i-sha').textContent=s.commit?`COMMIT ${s.commit}`:'NO COMMIT';
+  const sev=(s.severity||'unknown').toUpperCase();$('#i-severity').textContent=sev;
+  $('#i-severity').style.visibility=sev==='UNKNOWN'?'hidden':'visible';
+  const tests=s.tests||{},q=s.qodo||{},approval=s.approval||{},merge=s.merge||{};
+  const agents=s.subagents||[];
+  const events=[
+    ['MCP · Bright Data',s.fetched_at?'done':'locked',s.fetched_at?'source verified':'not started'],
+    ['Sandbox · isolated',evidenceState(tests.status,['passed']),tests.status||'not started'],
+    ['Subagents',agents.length>=2?'done':agents.length?'active':'locked',`${agents.length} returned`],
+    ['Session preserved',s.session_id?'done':'locked',s.session_id?String(s.session_id).slice(0,10):'no session'],
+    ['Qodo review',evidenceState(q.status,['passed','complete','approved']),q.status||'not started'],
+    ['Human approval',evidenceState(approval.status,['approved']),approval.status||'locked']
+  ];
+  $('#engine-events').innerHTML=events.map(([name,state,detail])=>`<div class="engine-event ${state}"><span class="event-icon">${state==='done'?'✓':state==='active'?'•':'—'}</span><span class="event-name">${esc(name)}</span><span class="event-detail">${esc(detail)}</span></div>`).join('');
+  const testDone=tests.status==='passed',qDone=['passed','complete','approved'].includes(q.status);
+  const items=[
+    ['Detected',s.fetched_at?'done':'locked',s.source||'Awaiting MCP evidence',''],
+    ['Reproduced',tests.status!=='pending'?'done':'locked',tests.before||'Awaiting failing test',''],
+    ['Patched',s.commit?'done':'locked',s.commit?`Commit ${s.commit}`:'No patch generated',''],
+    ['Sandbox tests',testDone?'done':tests.status==='failed'?'failed':tests.status==='running'?'active':'locked',testDone?`${tests.passed}/${tests.total} passed`:tests.status||'Not started',tests.total?`<div class="progress"><span style="width:${Math.min(100,100*(tests.passed||0)/tests.total)}%"></span></div>`:''],
+    ['Qodo review',qDone?'done':q.status==='reviewing'?'active':'locked',q.pr||'Awaiting code checks',q.finding?`<div class="review-box">${esc(q.finding)}${q.followup?' · follow-up complete':''}</div>`:''],
+    ['Approval',approval.status==='approved'?'done':approval.status==='waiting'?'active':'locked',approval.status==='waiting'?`Waiting for ${approval.approver||'approver'}`:approval.status||'Locked','']
+  ];
+  $('#stages').innerHTML=items.map(([name,state,detail,extra],i)=>`<article class="stage ${state}"><span class="stage-num">0${i+1}</span><h4>${esc(name)}</h4><p>${esc(detail)}</p>${extra}</article>`).join('');
+  const merged=merge.status==='merged',approved=approval.status==='approved';
+  const lock=$('#merge-lock');lock.className='merge-lock'+(merged?' approved':'');
+  lock.innerHTML=merged?`<span>✓ MERGED · ${esc(s.commit)}</span><small>Approved evidence recorded</small>`:
+    approved?`<span>🔓 APPROVED TO MERGE</span><small>Exact commit ${esc(s.commit)}</small>`:
+    '<span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small>';
+}
 
 refresh();refreshChat();connectEvents();
 setInterval(refresh,4000);
 setInterval(()=>{if(!es)refreshChat();},3000);   // fallback only
+setInterval(refreshIncident,1500);
 </script></body></html>
 """
 

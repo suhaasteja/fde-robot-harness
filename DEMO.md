@@ -108,6 +108,25 @@ This is a product film with technical proof, not a narrated terminal session. Re
 hero, the control panel is the product, and TrueForge is visibly the engine. Every shot must
 either advance the incident or prove a judging criterion.
 
+### Non-negotiable reveal order
+
+Before Reachy begins the approval interaction or speaks, the film must visibly prove—in
+the products' native interfaces—that the agent completed its work:
+
+1. **TrueForge first:** show the named session receiving the task, calling Bright Data MCP,
+   generating the patch, running the failing and passing tests in the isolated sandbox,
+   receiving both subagent results, and stopping at its native approval checkpoint.
+2. **Qodo second:** show the actual GitHub pull request with Qodo's completed initial review,
+   the finding and team response, the corrective commit, and Qodo's follow-up review on the
+   exact final SHA.
+3. **Reachy third:** only after the UI visibly says `SANDBOX PASSED`, `QODO REVIEWED`, and
+   `APPROVAL REQUIRED` may Reachy turn toward the approver and speak.
+
+Do not replace steps 1 or 2 with narration, the custom dashboard, a terminal log, or logos.
+Use readable screen recordings of TrueForge and the Qodo PR itself. Brief zooms and callouts
+may direct attention, but the authentic interface, URL/PR number, session ID, and commit SHA
+must remain visible.
+
 ### Visual language
 
 - Use one clean 16:9 capture at 1440p or 4K. Record screen and camera separately and edit;
@@ -158,11 +177,11 @@ fabricate a result or imply two events happened in an order they did not.
 |---|---|---|---|
 | **0:00–0:12** | Cold open: Reachy turns toward camera; fast cut to `CRITICAL` incident card | “Security bots can write patches. The dangerous part is deciding when to trust them.” | Clear problem; originality |
 | **0:12–0:24** | One uninterrupted view of the six-step product timeline; merge visibly locked | “Physical SOC uses TrueForge to investigate, patch, test, and stop before the irreversible step.” | Product understood; TrueForge central |
-| **0:24–0:42** | `MCP` event expands: Bright Data tool name, public advisory URL, fetched-at time, CVE summary | “A TrueForge session reaches a real Bright Data MCP tool and finds a critical advisory affecting our service.” | Real external tool; authorized public data |
-| **0:42–1:03** | TrueForge close-up: failing security test, generated patch diff, isolated-sandbox badge, then `18/18 PASS` | “The agent reproduces the exploit, writes the smallest patch, and runs it inside TrueForge’s isolated sandbox—not on our machine.” | Generated code; sandbox; technical excellence |
-| **1:03–1:18** | Two subagent cards resolve side by side: `Blast radius` and `Regression audit`, each with a useful one-line conclusion | “Two subagents independently map the blast radius and audit the change.” | Real delegation |
-| **1:18–1:29** | Refresh/reconnect animation; same session ID and timeline restore with approval still pending | “We reconnect. TrueForge restores the same session, including the locked approval.” | Persistent session |
-| **1:29–1:44** | Qodo-reviewed PR card: completed review, addressed finding, follow-up review; return to amber gate | “The patch has tests and a completed Qodo review. But good automation still knows where its authority ends.” | Qodo use; code quality; control |
+| **0:24–0:42** | **Native TrueForge session:** task appears, then the Bright Data MCP tool call expands with public advisory URL, fetched-at time, and CVE summary | “This TrueForge agent reaches a real Bright Data MCP tool and finds a critical advisory affecting our service.” | Real external tool; TrueForge central; authorized public data |
+| **0:42–1:03** | **Native TrueForge execution:** agent-generated patch diff, explicit isolated-sandbox badge, failing security test, then `18/18 PASS`; keep session ID visible | “It reproduces the exploit, writes the smallest patch, and runs it inside TrueForge’s isolated sandbox—not on our machine.” | Visible agent work; generated code; sandbox |
+| **1:03–1:18** | **Native TrueForge subagent view:** `Blast radius` and `Regression audit` return different, useful conclusions; end on native `APPROVAL REQUIRED` checkpoint | “Two subagents independently map the blast radius and audit the change. Then TrueForge stops.” | Real delegation; native approval gate |
+| **1:18–1:29** | Refresh/reconnect the **TrueForge interface**; same session ID, results, and native approval checkpoint return | “We reconnect. TrueForge restores the same session, including the locked approval.” | Persistent session |
+| **1:29–1:44** | **Native GitHub/Qodo PR:** show PR number and matching SHA, initial Qodo finding, team response and fix, then completed follow-up review; cut back to dashboard showing `QODO REVIEWED · APPROVAL REQUIRED` | “The exact patch has tests and a completed Qodo review. But good automation still knows where its authority ends.” | Visible Qodo checks; code quality; control |
 | **1:44–2:12** | Music stops. Reachy raises antennae, faces Aahan, and speaks; UI remains visible in a picture-in-picture | Reachy: “Critical. CVE-XXXX-XXXXX. Remote code execution in the request parser. The patch passed 18 tests and Qodo review. Aahan, do you approve commit 7f3a21c?” | Physical, informed, commit-bound approval |
 | **2:12–2:27** | Aahan denies. Transcript prints the words; gate stays amber and merge stays locked for two full seconds | Aahan: “No. Hold the merge.” Narrator: “A no—and anything ambiguous—fails closed.” | Negative path; safety is real |
 | **2:27–2:42** | Reachy asks again only after an explicit retry action; Aahan approves exact commit | Aahan: “I approve commit 7f3a21c.” | Explicit human approval |
@@ -182,6 +201,8 @@ fabricate a result or imply two events happened in an order they did not.
    interaction into a decision; it does not implement a parallel or bypass gate.
 8. Qodo evidence is real and completed before merge. The required hackathon development
    PR history is also linked separately in README; runtime Qodo use does not replace it.
+9. The native TrueForge work and native Qodo review both appear before the first frame in
+   which Reachy begins its approval movement or speech.
 
 ### Capture and edit plan
 
@@ -326,6 +347,8 @@ Do not submit until every answer is yes:
 
 - [ ] Can a new viewer explain the product after the first 15 seconds?
 - [ ] Is Reachy visible before the first technical detail and during the full approval?
+- [ ] Before Reachy speaks, did viewers clearly see the agent working in native TrueForge
+  and the completed checks in the native GitHub/Qodo pull request?
 - [ ] Does every TrueForge capability have readable, authentic on-screen evidence?
 - [ ] Is the exact commit SHA consistent from patch through approval, merge, and audit?
 - [ ] Does the denial visibly keep the merge locked for at least two seconds?

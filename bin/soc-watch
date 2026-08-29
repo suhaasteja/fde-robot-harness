@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Synchronize verifiable demo evidence into the Physical SOC incident UI.
+
+This bridge is intentionally read-only: TrueForge and GitHub/Qodo remain the
+sources of truth. It writes their evidence to .run/incident.json atomically;
+missing or malformed evidence stays pending and can never unlock a merge.
+
+    bin/soc-watch --session SESSION_ID --pr OWNER/REPO#12 --once
+    bin/soc-watch --session SESSION_ID --pr OWNER/REPO#12
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE_FILE = ROOT / ".run" / "incident.json"
+TRUEFORGE = os.getenv("TRUEFORGE_BASE_URL", "http://localhost:8790").rstrip("/")
+
+
+def get_json(url: str) -> dict:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            return json.loads(response.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        return {}
+
+
+def atomic_write(value: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="incident-", suffix=".json", dir=STATE_FILE.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+        os.replace(name, STATE_FILE)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def existing_state() -> dict:
+    try:
+        value = json.loads(STATE_FILE.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def sync_trueforge(state: dict, session_id: str) -> None:
+    session = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}").get("data", {})
+    turns = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns").get("data", [])
+    if not session:
+        state["trueforge_error"] = "session unavailable"
+        return
+    state.pop("trueforge_error", None)
+    state["session_id"] = session_id
+    state["trueforge_url"] = f"{TRUEFORGE}/sessions/{session_id}"
+
+    # Preserve the full raw evidence for audit/debugging. Presentation fields
+    # are populated by the workflow itself, never guessed from prose here.
+    state["trueforge"] = {
+        "title": session.get("title"),
+        "updated_at": session.get("updated_at") or session.get("updatedAt"),
+        "turn_count": len(turns) if isinstance(turns, list) else 0,
+    }
+    if isinstance(turns, list) and turns:
+        last = turns[-1]
+        turn_id = last.get("id")
+        if turn_id:
+            detail = get_json(
+                f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns/{turn_id}"
+            ).get("data", {})
+            turn_state = detail.get("state", {})
+            required = turn_state.get("requiredActions") or turn_state.get("required_actions")
+            if required:
+                state["trueforge"]["approval_requested"] = True
+
+
+def gh_pr(pr: str) -> dict:
+    fields = "number,url,headRefOid,statusCheckRollup,reviews,commits"
+    result = subprocess.run(
+        ["gh", "pr", "view", pr, "--json", fields],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    if result.returncode:
+        return {"error": (result.stderr or result.stdout).strip()[:300]}
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        return {"error": "GitHub returned invalid JSON"}
+
+
+def sync_qodo(state: dict, pr: str) -> None:
+    data = gh_pr(pr)
+    if data.get("error"):
+        state["qodo"] = {"status": "pending", "error": data["error"], "pr": pr}
+        return
+
+    checks = data.get("statusCheckRollup") or []
+    qodo_checks = []
+    for check in checks:
+        haystack = " ".join(
+            str(check.get(key, "")) for key in ("name", "context", "workflowName", "app")
+        ).lower()
+        if "qodo" in haystack or "codium" in haystack:
+            qodo_checks.append(check)
+    reviews = data.get("reviews") or []
+    qodo_reviews = [
+        review for review in reviews
+        if "qodo" in str((review.get("author") or {}).get("login", "")).lower()
+        or "codium" in str((review.get("author") or {}).get("login", "")).lower()
+    ]
+
+    conclusions = [
+        str(check.get("conclusion") or check.get("state") or check.get("status") or "").upper()
+        for check in qodo_checks
+    ]
+    complete = bool(qodo_checks or qodo_reviews) and all(
+        value in {"SUCCESS", "COMPLETED", "NEUTRAL", "APPROVED"} for value in conclusions
+    )
+    # A follow-up is evidence of review after a response/fix: at least two Qodo
+    # check/review events and more than one commit on the PR.
+    commits = data.get("commits") or []
+    followup = len(qodo_checks) + len(qodo_reviews) >= 2 and len(commits) >= 2
+    final_sha = data.get("headRefOid")
+    state["commit"] = final_sha[:7] if final_sha else state.get("commit")
+    state["qodo"] = {
+        "status": "complete" if complete and followup else "reviewing" if qodo_checks or qodo_reviews else "pending",
+        "pr": f"PR #{data.get('number')}" if data.get("number") else pr,
+        "url": data.get("url"),
+        "final_sha": final_sha,
+        "checks": len(qodo_checks),
+        "reviews": len(qodo_reviews),
+        "followup": followup,
+        "finding": "Follow-up review complete" if complete and followup else "Awaiting Qodo follow-up review",
+    }
+
+
+def enforce_gate(state: dict) -> None:
+    """Expose approval only when all machine-verifiable prerequisites agree."""
+    tests_pass = (state.get("tests") or {}).get("status") == "passed"
+    qodo = state.get("qodo") or {}
+    qodo_pass = qodo.get("status") == "complete" and qodo.get("followup") is True
+    requested = (state.get("trueforge") or {}).get("approval_requested") is True
+    commit = str(state.get("commit") or "")
+    reviewed_sha = str(qodo.get("final_sha") or "")
+    sha_matches = bool(commit and reviewed_sha and reviewed_sha.startswith(commit))
+    ready = tests_pass and qodo_pass and requested and sha_matches
+    approval = state.setdefault("approval", {})
+    if approval.get("status") != "approved":
+        approval["status"] = "waiting" if ready else "locked"
+    approval["prerequisites"] = {
+        "sandbox_tests": tests_pass,
+        "qodo_followup": qodo_pass,
+        "trueforge_checkpoint": requested,
+        "commit_matches": sha_matches,
+    }
+    if not ready and approval.get("status") != "approved":
+        state.setdefault("merge", {})["status"] = "locked"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--session", help="TrueForge session id")
+    parser.add_argument("--pr", help="GitHub PR URL, number, or OWNER/REPO#NUMBER")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--interval", type=float, default=2.0)
+    args = parser.parse_args()
+    if not args.session and not args.pr:
+        parser.error("at least one of --session or --pr is required")
+
+    while True:
+        state = existing_state()
+        if args.session:
+            sync_trueforge(state, args.session)
+        if args.pr:
+            sync_qodo(state, args.pr)
+        enforce_gate(state)
+        atomic_write(state)
+        print(json.dumps({"session": state.get("session_id"), "qodo": state.get("qodo")}, indent=2))
+        if args.once:
+            return
+        time.sleep(max(0.5, args.interval))
+
+
+if __name__ == "__main__":
+    main()
