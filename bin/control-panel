@@ -38,14 +38,17 @@ DEFAULT_PERSONALITY = "(built-in default)"
 # at the root, v0.10.0 under /api/v1. Probe rather than hardcode, so the panel
 # works across the versions we actually switch between. The daemon is separate
 # and always /api.
-_APP_PREFIX: str | None = None
+_APP_PREFIX: str | None = "\0unset"
+
+
+_NO_PREFIX = "\0unset"  # sentinel: "" is a *valid* prefix, so None/falsy won't do
 
 
 def app_prefix() -> str | None:
     """Return the app's API prefix, probing once and caching the result."""
     global _APP_PREFIX
-    if _APP_PREFIX is not None:
-        return _APP_PREFIX or None
+    if _APP_PREFIX != _NO_PREFIX:
+        return _APP_PREFIX
     for candidate in ("/api/v1", ""):
         ok, _ = fetch(f"{APP_UI}{candidate}/personalities", timeout=1.5)
         if ok:
@@ -57,7 +60,7 @@ def app_prefix() -> str | None:
 def reset_app_prefix() -> None:
     """Forget the cached prefix, so a restarted app on a different version re-probes."""
     global _APP_PREFIX
-    _APP_PREFIX = None
+    _APP_PREFIX = _NO_PREFIX
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = REPO_ROOT / "logs" / "app.log"
@@ -227,6 +230,29 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/transcript":
             return self._send({"turns": read_transcript()})
 
+        if p == "/api/events":
+            # Relay the app's SSE stream so the page can subscribe same-origin
+            # (the app sends no CORS headers, so the browser can't reach :7860
+            # directly). The stream carries activity markers, not transcript
+            # text, so the page uses it purely as a "refresh now" trigger.
+            pfx = app_prefix()
+            if pfx is None:
+                return self._send({"error": "app UI unavailable"}, 502)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                req = urllib.request.Request(f"{APP_UI}{pfx}/conversation_events")
+                with urllib.request.urlopen(req, timeout=300) as up:
+                    for raw in up:
+                        self.wfile.write(raw)
+                        self.wfile.flush()
+            except Exception:
+                pass  # client navigated away, or the app stopped
+            return
+
         if p == "/api/prompt":
             name = DEFAULT_PERSONALITY
             if "?" in self.path:
@@ -340,6 +366,8 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .note{font-size:12px;color:#8b93a8;margin-top:10px;line-height:1.5}
 .warn{background:#241a10;border:1px solid #4d3a20;color:#fbbf24;padding:10px 12px;border-radius:8px;
   font-size:12.5px;margin-bottom:14px}
+.tab{padding:6px 12px;font-size:12px}
+.tab.on{background:#6366f1;color:#fff;border-color:#6366f1}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1c2030;
   border:1px solid #2c3143;padding:10px 18px;border-radius:9px;opacity:0;transition:opacity .25s;
   pointer-events:none;font-size:13px}
@@ -349,8 +377,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <h1>Reachy Mini</h1>
   <span class="pill" id="p-daemon">daemon</span>
   <span class="pill" id="p-ui">app</span>
+  <span class="pill" id="p-live">connecting</span>
   <span class="pill" id="p-dev"></span>
+  <span style="flex:1"></span>
+  <button class="ghost tab on" id="tab-ctl">Control</button>
+  <button class="ghost tab" id="tab-app">Robot UI</button>
 </header>
+<iframe id="appframe" src="about:blank" style="display:none;width:100%;height:calc(100vh - 62px);border:0"></iframe>
 <main>
   <div>
     <section>
@@ -460,9 +493,12 @@ async function refreshChat(){
   const {turns}=await api('/api/transcript');
   const c=$('#chat');
   if(!turns.length){c.innerHTML='<div class="empty">No transcript yet.</div>';return;}
-  if(turns.length===lastLen)return;
+  // Compare content, not just count: a partial turn grows in place, so a
+  // length check alone would leave the last line stale mid-utterance.
+  const sig=turns.length+'|'+(turns[turns.length-1]||{}).content;
+  if(sig===lastLen)return;
   const atBottom=c.scrollHeight-c.scrollTop-c.clientHeight<60;
-  lastLen=turns.length;
+  lastLen=sig;
   c.innerHTML=turns.map(t=>`<div class="turn ${t.role}"><div class="who">${t.role} · ${t.ts.slice(11)}</div>${
     t.content.replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</div>`).join('');
   if(atBottom)c.scrollTop=c.scrollHeight;
@@ -494,9 +530,40 @@ async function refresh(){
   }
   if(!s.app_ui)persLoaded=false;
 }
-refresh();refreshChat();
+// Live updates: the app pushes an activity marker the moment anything happens,
+// so refresh on that rather than on a timer. The interval below is only a
+// safety net for when the stream is down (app stopped, or started without --ui).
+let es=null, esTimer=null;
+function connectEvents(){
+  if(es){es.close();es=null;}
+  try{
+    es=new EventSource('/api/events');
+    es.addEventListener('activity',()=>{refreshChat();});
+    es.addEventListener('ready',()=>{$('#p-live').className='pill on';
+      $('#p-live').textContent='live';refreshChat();});
+    es.onerror=()=>{
+      $('#p-live').className='pill off';$('#p-live').textContent='polling';
+      if(es){es.close();es=null;}
+      clearTimeout(esTimer);esTimer=setTimeout(connectEvents,5000);
+    };
+  }catch(e){$('#p-live').className='pill off';$('#p-live').textContent='polling';}
+}
+
+let appLoaded=false;
+function showTab(which){
+  const app=which==='app';
+  document.querySelector('main').style.display=app?'none':'grid';
+  $('#appframe').style.display=app?'block':'none';
+  $('#tab-app').className='ghost tab'+(app?' on':'');
+  $('#tab-ctl').className='ghost tab'+(app?'':' on');
+  if(app&&!appLoaded){$('#appframe').src='http://127.0.0.1:7860/';appLoaded=true;}
+}
+$('#tab-ctl').onclick=()=>showTab('ctl');
+$('#tab-app').onclick=()=>showTab('app');
+
+refresh();refreshChat();connectEvents();
 setInterval(refresh,4000);
-setInterval(refreshChat,3000);
+setInterval(()=>{if(!es)refreshChat();},3000);   // fallback only
 </script></body></html>
 """
 

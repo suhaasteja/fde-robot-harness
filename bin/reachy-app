@@ -77,9 +77,23 @@ cmd_start() {
     exit 1
   fi
 
-  if [ ! -f "$HOME/.cache/huggingface/token" ] && [ -z "${HF_TOKEN:-}" ]; then
-    warn "No cached HF token and HF_TOKEN unset -- the realtime backend may fail auth."
+  if [ ! -f "$HOME/.cache/huggingface/token" ] && [ -z "${HF_TOKEN:-}" ] \
+     && ! grep -qs '^\(OPENAI_API_KEY\|GEMINI_API_KEY\|GOOGLE_API_KEY\)=' "$REPO_ROOT/.env"; then
+    warn "No API key found (no cached HF token, no HF_TOKEN, none in .env) -- auth may fail."
   fi
+
+  # If --ui is requested but 7860 is taken, the app starts anyway and just never
+  # serves a UI -- the bind error is buried in the log and nothing else complains.
+  # Catch it here instead of letting it look like a broken control panel.
+  case " $* " in
+    *" --ui "*)
+      if nc -z 127.0.0.1 7860 >/dev/null 2>&1; then
+        err "--ui requested but something already holds port 7860."
+        dim "  The app would start WITHOUT a UI and not tell you. Free it first:"
+        dim "    lsof -nP -iTCP:7860 -sTCP:LISTEN"
+        exit 1
+      fi ;;
+  esac
 
   # Launch by absolute path with conda scrubbed from the environment. Activating
   # conda (or inheriting its PATH) makes GStreamer load anaconda's older glib and
