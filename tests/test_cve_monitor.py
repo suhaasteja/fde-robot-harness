@@ -38,6 +38,18 @@ VERDICT: APPLICABLE CVE-2026-1111"""
     def test_patch_requires_passing_sandbox_marker(self):
         self.assertIsNone(monitor.PATCH_RE.search("TESTS: PASS\nVERDICT: APPLICABLE CVE-2026-1"))
 
+    def test_normalizes_gnu_diff_for_git_apply(self):
+        raw = """diff -ruN package.json package.json
+--- package.json\tbefore
++++ package.json\tafter
+@@ -1 +1 @@
+-old
++new"""
+        result = monitor.normalize_patch(raw)
+        self.assertIn("diff --git a/package.json b/package.json", result)
+        self.assertIn("--- a/package.json", result)
+        self.assertIn("+++ b/package.json", result)
+
 
 if __name__ == "__main__":
     unittest.main()
