@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""
+robot-mcp — expose the Reachy Mini to TrueForge (or any MCP client) as tools.
+
+Talks to the reachy-mini daemon's HTTP API on :8000, so it coexists with the
+conversation app rather than competing for the robot: both are just daemon
+clients. The daemon must be running; the conversation app need not be.
+
+    bin/robot-mcp                    # http://127.0.0.1:7880/mcp
+    bin/robot-mcp --port N
+
+Register in TrueForge under Settings -> Connectors -> Add MCP Server, or:
+
+    curl -X POST http://localhost:8790/api/v1/settings/mcp-servers \
+      -H 'Content-Type: application/json' -d '{"manifest":{
+        "name":"reachy-mini","type":"remote",
+        "url":"http://127.0.0.1:7880/mcp",
+        "description":"Control a Reachy Mini desk robot."}}'
+
+Angles are exposed in DEGREES because that is what models reason about well;
+the daemon wants radians, so this converts at the boundary.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import sys
+
+import httpx
+from mcp.server import MCPServer
+
+DAEMON = "http://127.0.0.1:8000/api"
+TIMEOUT = 15.0
+
+mcp = MCPServer(
+    "reachy-mini",
+    instructions=(
+        "Controls a physical Reachy Mini desk robot: head and antenna motion, "
+        "recorded emotions and dances, sound, volume, and face tracking. "
+        "Movement is real and visible to people nearby, so prefer small, "
+        "deliberate gestures. Call robot_status first if a command seems to "
+        "do nothing -- the robot may simply be unplugged."
+    ),
+)
+
+
+def _call(method: str, path: str, payload: dict | None = None) -> dict:
+    """One daemon call, with errors returned as data so the model can react."""
+    url = f"{DAEMON}{path}"
+    try:
+        with httpx.Client(timeout=TIMEOUT) as c:
+            r = c.request(method, url, json=payload)
+            r.raise_for_status()
+            return r.json() if r.content else {"ok": True}
+    except httpx.ConnectError:
+        return {
+            "error": "daemon_unreachable",
+            "detail": "No reachy-mini daemon on 127.0.0.1:8000. "
+            "Start it with ~/reachy-conv/bin/reachy-mini-daemon (robot must be plugged in).",
+        }
+    except httpx.HTTPStatusError as e:
+        return {"error": f"http_{e.response.status_code}", "detail": e.response.text[:300]}
+    except Exception as e:  # noqa: BLE001
+        return {"error": type(e).__name__, "detail": str(e)[:300]}
+
+
+# --- state -----------------------------------------------------------------
+
+
+@mcp.tool()
+def robot_status() -> dict:
+    """Check whether the robot is reachable and report its current pose.
+
+    Call this first if anything else fails — it distinguishes "daemon is down"
+    from "the robot ignored the command".
+    """
+    head = _call("GET", "/state/present_head_pose")
+    if "error" in head:
+        return {"connected": False, **head}
+    yaw = _call("GET", "/state/present_body_yaw")
+    ant = _call("GET", "/state/present_antenna_joint_positions")
+    vol = _call("GET", "/volume/current")
+    return {
+        "connected": True,
+        "head_pose": head,
+        "body_yaw": yaw,
+        "antennas": ant,
+        "volume": vol.get("volume"),
+        "audio_device": vol.get("device"),
+    }
+
+
+# --- posture ---------------------------------------------------------------
+
+
+@mcp.tool()
+def wake_up() -> dict:
+    """Wake the robot: lift its head to the neutral upright position.
+
+    Use when the robot's head is down or it has been asleep. A daemon started
+    with --no-wake-up-on-start leaves the head down until this is called.
+    """
+    return _call("POST", "/move/play/wake_up")
+
+
+@mcp.tool()
+def go_to_sleep() -> dict:
+    """Lower the robot's head to its resting position."""
+    return _call("POST", "/move/play/goto_sleep")
+
+
+@mcp.tool()
+def look(
+    yaw_degrees: float = 0.0,
+    pitch_degrees: float = 0.0,
+    roll_degrees: float = 0.0,
+    body_yaw_degrees: float | None = None,
+    duration_seconds: float = 1.0,
+) -> dict:
+    """Turn the robot's head to face a direction.
+
+    Args:
+        yaw_degrees: left/right. Positive is the robot's left. Keep within ~-60..60.
+        pitch_degrees: up/down. Positive looks down. Keep within ~-30..30.
+        roll_degrees: head tilt. Keep within ~-25..25.
+        body_yaw_degrees: optionally rotate the whole body too.
+        duration_seconds: how long the motion takes; larger is gentler.
+
+    Angles are degrees here and converted to radians for the daemon.
+    """
+    payload: dict = {
+        "head_pose": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "roll": math.radians(roll_degrees),
+            "pitch": math.radians(pitch_degrees),
+            "yaw": math.radians(yaw_degrees),
+        },
+        "duration": max(0.1, duration_seconds),
+        "interpolation": "minjerk",
+    }
+    if body_yaw_degrees is not None:
+        payload["body_yaw"] = math.radians(body_yaw_degrees)
+    return _call("POST", "/move/goto", payload)
+
+
+@mcp.tool()
+def set_antennas(
+    left_degrees: float = 0.0, right_degrees: float = 0.0, duration_seconds: float = 0.5
+) -> dict:
+    """Move the two antennas. Useful for expressive gestures — perked up,
+    drooped, or asymmetric. Roughly -90..90 each."""
+    return _call(
+        "POST",
+        "/move/goto",
+        {
+            "antennas": [math.radians(left_degrees), math.radians(right_degrees)],
+            "duration": max(0.1, duration_seconds),
+            "interpolation": "minjerk",
+        },
+    )
+
+
+@mcp.tool()
+def stop_moving() -> dict:
+    """Immediately stop any running movement, dance, or emotion."""
+    return _call("POST", "/move/stop")
+
+
+# --- expressive moves ------------------------------------------------------
+
+
+# The daemon resolves these against HuggingFace, so they must be full repo ids,
+# not bare words -- "emotions" 404s as a nonexistent dataset.
+MOVE_LIBRARIES = {
+    "emotions": "pollen-robotics/reachy-mini-emotions-library",
+    "dances": "pollen-robotics/reachy-mini-dances-library",
+}
+
+
+def _resolve_library(dataset: str) -> str:
+    """Accept the friendly name or a full repo id."""
+    return MOVE_LIBRARIES.get(dataset.strip().lower(), dataset)
+
+
+@mcp.tool()
+def list_moves(dataset: str = "emotions") -> dict:
+    """List the named moves available to play_move.
+
+    Args:
+        dataset: "emotions" or "dances" (or a full HuggingFace repo id).
+
+    Call this before play_move rather than guessing a move name.
+    """
+    res = _call("GET", f"/move/recorded-move-datasets/list/{_resolve_library(dataset)}")
+    if isinstance(res, list):
+        return {"dataset": dataset, "moves": res}
+    return res
+
+
+@mcp.tool()
+def play_move(move_name: str, dataset: str = "emotions") -> dict:
+    """Play a named recorded move — an emotion or a dance.
+
+    Args:
+        move_name: a name returned by list_moves.
+        dataset: the library it came from ("emotions" or "dances").
+
+    This is the expressive channel: use it to make the robot react visibly
+    rather than only speaking.
+    """
+    lib = _resolve_library(dataset)
+    return _call("POST", f"/move/play/recorded-move-dataset/{lib}/{move_name}")
+
+
+# --- audio -----------------------------------------------------------------
+
+
+@mcp.tool()
+def list_sounds() -> dict:
+    """List sound files the robot can play."""
+    res = _call("GET", "/media/sounds")
+    return {"sounds": res} if isinstance(res, list) else res
+
+
+@mcp.tool()
+def play_sound(filename: str) -> dict:
+    """Play one of the robot's sound files. Use list_sounds for valid names."""
+    return _call("POST", "/media/play_sound", {"filename": filename})
+
+
+@mcp.tool()
+def set_volume(level: int) -> dict:
+    """Set speaker volume, 0-100.
+
+    macOS quantises volume to 16 steps, so the value read back may differ by
+    a point or two from what was set. That is expected, not a failure.
+    """
+    return _call("POST", "/volume/set", {"volume": max(0, min(100, int(level)))})
+
+
+# --- perception ------------------------------------------------------------
+
+
+@mcp.tool()
+def face_tracking(enabled: bool) -> dict:
+    """Turn face tracking on or off — whether the head follows a person."""
+    path = "/media/tracking/enable" if enabled else "/media/tracking/disable"
+    return _call("POST", path)
+
+
+@mcp.tool()
+def detected_face() -> dict:
+    """Report the currently detected face position, if anyone is visible.
+
+    Use to check whether someone is actually in front of the robot before
+    addressing them.
+    """
+    return _call("GET", "/media/tracking/face")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Reachy Mini MCP server")
+    ap.add_argument("--port", type=int, default=7880)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args()
+
+    print(f"Reachy Mini MCP  ->  http://{args.host}:{args.port}/mcp", file=sys.stderr)
+    print(f"  daemon: {DAEMON}", file=sys.stderr)
+    # mcp 2.0 takes host/port on the transport runner, not on .settings.
+    mcp.run(transport="streamable-http", host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()
