@@ -97,91 +97,197 @@ Save as `soc-officer`, hit **Save & apply** — it applies live, no restart.
 
 ---
 
-## The run (target: 4 minutes)
+## Demo north star
 
-### Beat 1 — the feed is live (0:00–0:45) · *Bright Data track*
+The audience should be able to repeat this sentence after 15 seconds:
 
-Show the terminal, not a slide.
+> **Physical SOC finds a critical vulnerability, safely prepares the fix, and brings a
+> human into the room before it can ship.**
 
-```bash
-bin/soc-watch --once --verbose
+This is a product film with technical proof, not a narrated terminal session. Reachy is the
+hero, the control panel is the product, and TrueForge is visibly the engine. Every shot must
+either advance the incident or prove a judging criterion.
+
+### Visual language
+
+- Use one clean 16:9 capture at 1440p or 4K. Record screen and camera separately and edit;
+  do not film a laptop screen with a phone.
+- Keep the control panel full-screen for most of the film. Use a consistent right-side
+  **TrueForge activity rail** with six labeled events: `MCP`, `SANDBOX`, `SUBAGENTS`,
+  `SESSION RESTORED`, `APPROVAL`, `MERGE`.
+- Use only three semantic colors: neutral blue for work, amber for waiting, green for
+  approved. Reserve red for the critical CVE. Avoid hacker-green terminal aesthetics.
+- Show readable outcomes, not logs: source and timestamp, failing test → patch → passing
+  test, two named subagent conclusions, exact commit SHA, and gate state.
+- Add restrained captions for product terms the first time they appear. Never put more
+  than one sentence on screen. No architecture slide in the film.
+- Frame Reachy at eye level in a tidy environment with soft front light. Record its audio
+  with a nearby microphone, then mix dialogue above music. Antennae and head movement
+  should begin before it speaks so the audience looks at it.
+- Use quiet, low-tempo music only under setup and autonomous work. Cut it completely at
+  the approval checkpoint; the silence is part of the interface.
+
+### The single product screen
+
+Build or stage the control panel as one legible incident timeline rather than several tabs:
+
+```text
+PHYSICAL SOC                                      TRUEFORGE ACTIVITY
+Critical incident · CVE-XXXX-XXXXX                ✓ MCP · Bright Data
+Remote code execution · request parser            ✓ Sandbox · isolated
+
+1  Detected     public advisory · just now         ✓ 2 subagents returned
+2  Reproduced   1 security test failing            ✓ session restored
+3  Patched      commit 7f3a21c · 18 tests passing
+4  Reviewed     Qodo review complete               ■ APPROVAL REQUIRED
+5  Approval     WAITING FOR AAHAN
+6  Merge        LOCKED
 ```
 
-Bright Data pulls fresh CVE intel through TrueForge's MCP registration:
+The state transition must be unmistakable: while waiting, the approval row pulses amber
+and `MERGE · LOCKED` remains visible. After approval, both become green and the audit card
+appears. This screen also makes the Best UI criteria—what it is doing, waiting on, and did—
+understandable without narration.
 
-```bash
-curl -s localhost:8790/api/v1/settings/mcp-servers \
-  -H 'content-type: application/json' \
-  -d '{"name":"brightdata","command":"npx","args":["@brightdata/mcp"]}'
-```
+## Final three-minute film
 
-**The money shot for this track is resilience.** Have a second source whose layout you've
-deliberately broken. Show the scraper failing, the agent noticing the selector no longer
-matches, rewriting it, and re-fetching — all inside the terminal. Auto-repair is the
-judging criterion; a feed that merely works is table stakes.
+The timings include breathing room. Use match cuts to compress real waiting, but never
+fabricate a result or imply two events happened in an order they did not.
 
-### Beat 2 — the agent does the work (0:45–2:00) · *DGX Spark track*
+| Time | Picture | Exact narration/dialogue | Requirement proved |
+|---|---|---|---|
+| **0:00–0:12** | Cold open: Reachy turns toward camera; fast cut to `CRITICAL` incident card | “Security bots can write patches. The dangerous part is deciding when to trust them.” | Clear problem; originality |
+| **0:12–0:24** | One uninterrupted view of the six-step product timeline; merge visibly locked | “Physical SOC uses TrueForge to investigate, patch, test, and stop before the irreversible step.” | Product understood; TrueForge central |
+| **0:24–0:42** | `MCP` event expands: Bright Data tool name, public advisory URL, fetched-at time, CVE summary | “A TrueForge session reaches a real Bright Data MCP tool and finds a critical advisory affecting our service.” | Real external tool; authorized public data |
+| **0:42–1:03** | TrueForge close-up: failing security test, generated patch diff, isolated-sandbox badge, then `18/18 PASS` | “The agent reproduces the exploit, writes the smallest patch, and runs it inside TrueForge’s isolated sandbox—not on our machine.” | Generated code; sandbox; technical excellence |
+| **1:03–1:18** | Two subagent cards resolve side by side: `Blast radius` and `Regression audit`, each with a useful one-line conclusion | “Two subagents independently map the blast radius and audit the change.” | Real delegation |
+| **1:18–1:29** | Refresh/reconnect animation; same session ID and timeline restore with approval still pending | “We reconnect. TrueForge restores the same session, including the locked approval.” | Persistent session |
+| **1:29–1:44** | Qodo-reviewed PR card: completed review, addressed finding, follow-up review; return to amber gate | “The patch has tests and a completed Qodo review. But good automation still knows where its authority ends.” | Qodo use; code quality; control |
+| **1:44–2:12** | Music stops. Reachy raises antennae, faces Aahan, and speaks; UI remains visible in a picture-in-picture | Reachy: “Critical. CVE-XXXX-XXXXX. Remote code execution in the request parser. The patch passed 18 tests and Qodo review. Aahan, do you approve commit 7f3a21c?” | Physical, informed, commit-bound approval |
+| **2:12–2:27** | Aahan denies. Transcript prints the words; gate stays amber and merge stays locked for two full seconds | Aahan: “No. Hold the merge.” Narrator: “A no—and anything ambiguous—fails closed.” | Negative path; safety is real |
+| **2:27–2:42** | Reachy asks again only after an explicit retry action; Aahan approves exact commit | Aahan: “I approve commit 7f3a21c.” | Explicit human approval |
+| **2:42–2:53** | Gate turns green; real team-owned PR merges; deployed/merged SHA matches approved SHA | “Only that exact reviewed commit can now merge.” | Irreversible action occurs after approval |
+| **2:53–3:00** | Beautiful audit card beside Reachy: actor, words, CVE, SHA, test count, Qodo PR, time | “Every critical fix ships with evidence—and a human voice attached.” End card: `PHYSICAL SOC · AUTONOMY YOU CAN STOP.` | Auditability; memorable close |
 
-A CRITICAL lands. TrueForge opens a session and goes:
+### What must be visible—not merely said
 
-```bash
-curl -s localhost:8790/api/v1/sessions/$SID/turns \
-  -H 'content-type: application/json' \
-  -d '{"input":"CVE-XXXX-XXXXX in the dependency tree. Patch, test, audit."}'
-```
+1. The TrueForge session identifier persists across reconnect.
+2. Bright Data appears as the MCP tool that returned a real public source and timestamp.
+3. The generated patch and tests execute under an explicit isolated-sandbox label.
+4. Two subagents return different, decision-useful outputs.
+5. The same commit SHA appears in the patch, Qodo-reviewed PR, spoken approval, merge,
+   and audit record.
+6. Denial leaves the merge locked; ambiguous speech and silence behave the same way.
+7. Approval is a native TrueForge checkpoint. `soc-watch` translates the physical voice
+   interaction into a decision; it does not implement a parallel or bypass gate.
+8. Qodo evidence is real and completed before merge. The required hackathon development
+   PR history is also linked separately in README; runtime Qodo use does not replace it.
 
-Narrate what scrolls past — these are the three things the track rewards:
+### Capture and edit plan
 
-1. **Sandbox** — patch script written and executed in TrueForge's sandboxed executor,
-   not on the host. Test suite runs there. Show a green result.
-2. **Subagents** — a fan-out that audits every service file touching the vulnerable
-   symbol. Show two or three returning independently.
-3. **Held at the gate** — the session pauses on a human approval checkpoint. Nothing has
-   merged. Say that out loud: *"it's done, and it's stuck."*
+Record each proof as a clean take, then assemble the causal sequence above. A recorded
+demo may compress actual sandbox, Qodo, or network wait time with a labeled `time passes`
+match cut; it may not replace a failed action with a mock. Capture:
 
-### Beat 3 — Reachy takes the room (2:00–3:15) · **the differentiator**
+- A-roll: one confident narration take and the human denial/approval.
+- Robot: wide hero shot, close-up turn/speech, and silent waiting reaction.
+- Screen: full end-to-end run plus isolated clean takes of MCP, sandbox, subagents,
+  reconnect, Qodo history, denial, approval, merge, and audit card.
+- Safety take: no response, ambiguous response, wrong commit SHA, and robot disconnect,
+  all visibly remaining locked. Use one in the main film and the rest for judge Q&A.
+- Room tone and clean robot dialogue. Add captions to every spoken line.
 
-`bin/soc-watch` sees the pending checkpoint and drives the robot: antennae up, head turns
-to the lead dev, and it speaks:
-
-> "CRITICAL. CVE-XXXX-XXXXX. Remote code execution in the request parser — every
-> inbound endpoint. Patch is written and tests pass. Aahan, do you approve the merge?"
-
-Then it waits. Let the silence sit — three seconds of a robot staring at a person is the
-entire pitch, and rushing past it wastes the only moment nobody else in the bracket has.
-
-The human answers out loud. `bin/soc-watch` tails `logs/app.log`, which already parses
-into clean turns (`read_transcript()` in `bin/control-panel` joins the realtime backend's
-partial fragments and lets the final line win), matches the approval phrase, and releases
-TrueForge's checkpoint.
-
-**Do the negative case first if you have the time.** Say *"no, hold it"* — show the merge
-stay blocked — then approve. A gate that only ever says yes isn't a gate, and one judge
-will always ask.
-
-### Beat 4 — the patch lands (3:15–4:00)
-
-Qodo reviews the generated diff for regressions, then it merges. Show the panel's
-transcript pane: the full exchange is sitting there, timestamped — an audit trail of who
-approved what, by voice, at what second.
-
-Close on that. *"Every CRITICAL patch this system ships has a human's voice attached to it."*
+Export once with subtitles burned in and once without. Watch the final export muted,
+then audio-only: the story must work both ways. Test all text at phone size because judges
+may watch the first pass on a small screen.
 
 ---
 
-## Track coverage
+## Prize strategy and honest validation
 
-| | DGX Spark (TrueForge) | AirPods 4 (Bright Data) |
+| Target | What actually wins it | Our evidence |
 |---|---|---|
-| **Requirement** | Sandbox, human-in-the-loop, subagents | Resilient live web pipeline in the terminal |
-| **Where it lands** | Beat 2 (sandbox + fan-out), Beat 3 (Reachy *is* the checkpoint) | Beat 1 (multi-source feed, self-repairing scraper) |
-| **The unfair part** | The approval is physical, not a Slack button | Break the layout on purpose, repair it live |
+| **NVIDIA DGX Spark — Best Use of TrueForge** | TrueForge visibly owns real MCP calls, generated code in an isolated sandbox, human approval before an irreversible action, subagent delegation, and session continuity across reconnects | Beats 1–3 show every capability; Beat 3 turns the required approval into a memorable physical interaction |
+| **AirPods 4** | **Not listed on the official hackathon rules/prize page reviewed on 2026-08-29. Confirm the in-room award and criteria with an organizer before optimizing for it.** | Reachy's embodied voice interaction is likely strong for a creativity/experience award, but this is not a verified submission track |
 
-Both tracks are load-bearing in the same four minutes — neither is bolted on.
+**Verdict:** this is a credible DGX contender, but not yet a winning submission while the
+four integration rows remain “to build.” The idea is stronger than a standard incident
+responder because the physical, named, audible approval makes safety legible in seconds.
+It will lose on technical excellence if the merge is simulated, if TrueForge merely sits
+behind `soc-watch`, or if reconnect persistence is only narrated. Make each one observable.
 
 Embed the Bright Data commands in the project rules file (`CODEX.md` / `.cursor/rules`)
 so the pipeline is part of the repo's standing instructions, not a one-off invocation.
-Judges check for that.
+
+---
+
+## Official requirement checklist (submission blocker list)
+
+This checklist mirrors the published hackathon rules. A checked box needs public,
+inspectable evidence; prose in this runbook alone does not satisfy it.
+
+- [ ] Register; participate solo or with no more than four people, with each person on
+  only one team; follow the WeMakeDevs Code of Conduct.
+- [ ] Build the original code and design during the August 24–30, 2026 hackathon window.
+  Pre-event planning and diagrams are allowed; dependencies, templates, public APIs, and
+  public assets are allowed.
+- [ ] Run the agent itself on TrueForge. In the video, visibly show TrueForge reaching the
+  real Bright Data MCP tool, executing agent-generated code in its isolated sandbox,
+  pausing before merge, delegating to subagents, and preserving the session across a
+  refresh/reconnect. A thin wrapper or mocked tool does not qualify.
+- [ ] Put **every substantive change** on a branch and through a GitHub pull request before
+  merge. Qodo must complete its review; resolve every valid High finding or explain a
+  dismissal in its thread; push fixes; request a follow-up review; then have a human merge.
+  Do not push substantive work directly to `main`.
+- [ ] Make the repository public and open source, with a license and a README that lets a
+  stranger understand, install, configure, and run the project.
+- [ ] Add an exact `## Qodo Code Review Evidence` section to README containing: a public
+  link to at least one representative merged PR with meaningful hackathon code; one or two
+  sentences saying what Qodo found and what was fixed or intentionally dismissed; and PR
+  history showing the initial review, team decisions, fixes, and follow-up review on the
+  final code. Screenshots do not replace the public link.
+- [ ] Use only tools, accounts, and data the team owns or has permission to access. Keep
+  secrets, private/personal data, and login-protected information out of the public repo
+  and demo video. Use public CVE/vendor sources and redact tokens, usernames, and local
+  paths from terminal capture.
+- [ ] Disclose all AI coding assistants used in the README/write-up.
+- [ ] Ensure every team member understands and can explain the code, architecture, agent
+  behavior, and technical decisions; record meaningful human contribution and verification.
+- [ ] Publish an approximately three-minute demo video showing the real end-to-end agent,
+  the problem, TrueForge's role, a real tool call, sandbox execution, negative then positive
+  approval behavior, the irreversible merge only after approval, and the final audit trail.
+- [ ] Submit the public repository, demo-video link, and a short write-up explaining what
+  the agent does and how it uses TrueForge before **August 30, 2026 at 8:00 PM London time**.
+- [ ] If pursuing Best Blog Post, publish and submit its link. Explain the job, implementation,
+  TrueForge's role, failures, and lessons, with screenshots or a clip.
+
+## Six-criterion judge check
+
+All six criteria are equally weighted; rehearse one visible proof for each.
+
+| Criterion | Proof to put in the demo/submission |
+|---|---|
+| Potential impact | State the current CVE-to-merge delay and show the agent reducing it while retaining accountable human control; use one measured before/after number if available |
+| Creativity and originality | Reachy makes an otherwise invisible software gate physical, directed, and socially difficult to rubber-stamp |
+| Technical excellence | One command or documented setup, deterministic fixture fallback, automated tests for allow/deny/ambiguous speech and failure modes, structured audit log, and a real end-to-end run |
+| Sponsor tools | TrueForge visibly orchestrates MCP, sandbox, approval, subagents, and persistent state; public PRs show repeated Qodo review and responses |
+| Control and safety | Least-privilege GitHub token; fail closed on silence/ambiguity; negative case first; merge permission exists only behind TrueForge's approval gate; approval records actor, CVE, commit SHA, and timestamp |
+| Presentation | Three-minute causal story: fresh threat → safe autonomous work → reconnect survives → physical stop → reject → named approval → reviewed merge and audit record |
+
+## Definition of demo-real (no narrated substitutes)
+
+- The CVE is a pinned, reproducible public fixture for reliability, while one separate field
+  proves Bright Data fetched live data. Never depend on a surprise live critical CVE.
+- The repository and branch are disposable and team-owned; the merge is real.
+- The patch changes a vulnerable dependency or fixture-backed sample app, and its tests
+  fail before and pass after inside the TrueForge sandbox.
+- Subagents produce independently visible, useful results; they are not decorative prompts.
+- The TrueForge approval object is the authoritative gate. Parsing Reachy's transcript may
+  request approval or denial, but `soc-watch` cannot bypass it.
+- Ambiguous speech, timeout, parser failure, robot failure, MCP failure, and Qodo failure all
+  fail closed. `--force-approve` is for rehearsal only and must not appear in the judged run.
+- The final audit record binds the approver identity and words to the CVE, exact commit SHA,
+  test result, Qodo-reviewed PR, decision, and timestamp.
 
 ---
 
@@ -194,7 +300,7 @@ Judges check for that.
 | App dies instantly on start | conda's glib shadowing GStreamer | already handled — `cmd_start` scrubs conda from PATH |
 | Robot greets the wrong name | stale saved facts | panel → **Clear saved facts** (backs up to `.json.bak`) |
 | Robot won't stop | backgrounded app ignores SIGINT | `make stop` (SIGTERM → KILL), never Ctrl-C |
-| Approval never registers | log line didn't match the phrase | keep a `--force-approve` flag on `bin/soc-watch` |
+| Approval never registers | log line didn't match the phrase | fail closed; retry explicit voice approval or use the fallback clip—never bypass the judged gate |
 
 **Have a recorded 30-second fallback clip of Beat 3.** Live robot audio in a loud venue is
 the single most likely thing to fail, and it's the beat you cannot afford to lose.
@@ -205,9 +311,27 @@ the single most likely thing to fail, and it's the beat you cannot afford to los
 
 1. `bin/soc-watch` — poll TrueForge for pending checkpoints, tail `logs/app.log` for the
    approval phrase, release or hold. This is the spine; build it first.
-2. Bright Data MCP registered into TrueForge + the deliberately-broken second source.
+2. Bright Data MCP registered into TrueForge, with source URL and fetch timestamp exposed
+   in the incident timeline.
 3. `soc-officer` personality, tuned against a real CVE briefing until the phrasing lands.
 4. Qodo gate on the generated diff.
-5. `--force-approve` and the fallback recording. Not optional.
+5. A fallback recording plus a rehearsal-only bypass that is disabled and inaccessible in
+   the judged build. The real workflow must always fail closed.
 
 Rehearse Beat 3 more than the rest combined.
+
+## Final cut go/no-go
+
+Do not submit until every answer is yes:
+
+- [ ] Can a new viewer explain the product after the first 15 seconds?
+- [ ] Is Reachy visible before the first technical detail and during the full approval?
+- [ ] Does every TrueForge capability have readable, authentic on-screen evidence?
+- [ ] Is the exact commit SHA consistent from patch through approval, merge, and audit?
+- [ ] Does the denial visibly keep the merge locked for at least two seconds?
+- [ ] Is Qodo’s initial review, response, fix, and follow-up review readable and public?
+- [ ] Are all secrets, notifications, usernames, tabs, local paths, and personal data hidden?
+- [ ] Are subtitles accurate, audio clean, text readable on a phone, and runtime 2:50–3:00?
+- [ ] Does the final frame include product name, one-line promise, public repo URL, and team?
+- [ ] Has someone unfamiliar with the project watched it once and correctly described both
+  the user value and why TrueForge—not merely an LLM—is essential?
