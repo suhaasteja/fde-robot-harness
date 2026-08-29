@@ -162,6 +162,85 @@ Or by API — see the git log for `807e6d6`, which has the exact `curl` calls. N
 `POST /api/v1/agents` takes `{name, manifest}`, and **updates are by `agent_id`,
 not name**.
 
+## Integrating with another TrueForge setup
+
+If you already run TrueForge with your own connectors (Qodo, a codebase, subagents),
+**you do not need any of this repo's code**. The robot is just another MCP
+connector. Point your TrueForge at it and attach it to any agent you already have.
+
+### What this repo exposes
+
+| Surface | Where | Needs |
+|---|---|---|
+| Robot as an MCP server — 14 tools | `http://127.0.0.1:7880/mcp` | `bin/robot-mcp` + daemon |
+| `POST /say` — make the robot speak | `http://127.0.0.1:7860/say` | `bin/patch-app` + the app running `--ui` |
+
+Tools: `robot_status`, `wake_up`, `go_to_sleep`, `look`, `set_antennas`,
+`stop_moving`, `list_moves`, `play_move`, `list_sounds`, `play_sound`,
+`set_volume`, `say`, `face_tracking`, `detected_face`.
+
+### Adding the robot to your agents
+
+```bash
+curl -X POST http://<your-trueforge>/api/v1/settings/mcp-servers \
+  -H 'Content-Type: application/json' -d '{"manifest":{
+    "name":"reachy-mini","type":"remote",
+    "url":"http://127.0.0.1:7880/mcp",
+    "description":"Control a Reachy Mini desk robot: motion, emotions, speech."}}'
+```
+
+Then on any agent — including one that already has Qodo and your codebase:
+
+```json
+"mcp_servers": [
+  {"name": "reachy-mini", "preload": true, "preload_tools": ["say", "robot_status"]},
+  {"name": "qodo"},
+  {"name": "your-codebase"}
+]
+```
+
+**Preload `say` or your agent will never speak.** TrueForge defers tool loading:
+agents see only tool *names* and must call `get_tool_info` first. A tool the model
+never expands is invisible, and no amount of instruction fixes it. This cost us a
+debugging round — see [Preload `say`](#preload-say-or-the-robot-stays-silent).
+
+Then tell the agent *when* to speak. The working rules are in
+`trueforge/robot-operator.agent.json` — copy the "Speaking out loud" block. The
+parts that matter: a hard 45-word cap per spoken line, never read a list aloud,
+and announce at start / on subagent spawn / on failure / with the result.
+
+**Use a capable model.** `gpt-5-4-mini` could not hold these rules — it skipped
+announcements and parroted example phrasing from the prompt while doing something
+else. `gpt-5-5` is reliable.
+
+### Calling your agents from the robot
+
+The reverse direction is `tools/ask_agent.py`. Point it at your agent:
+
+```bash
+TRUEFORGE_BASE_URL=http://<your-trueforge>
+TRUEFORGE_DEFAULT_AGENT=<your-agent-name>
+```
+
+Anything that agent can reach — Qodo, your codebase, your subagents — is then
+reachable by voice, with no change to this repo.
+
+### What actually needs the robot
+
+Only motion, audio and volume. Your agents, connectors, `ask_agent`, and the whole
+MCP surface work against `--mockup-sim` with no hardware — see
+[Without a robot](#without-a-robot). Someone can integrate and test the entire
+software path before the robot is ever plugged in.
+
+### Contract notes
+
+- Angles are **degrees** at the MCP boundary; the daemon wants radians and
+  `robot-mcp` converts. Do not send radians.
+- `say` returns `ok:true` for **queued**, not spoken. It is not proof of audio.
+- Long spoken lines get lost. Keep them short; the 45-word cap is not cosmetic.
+- Movement is real. The default `require_approval_for_tools: ["@write","@destructive"]`
+  gate is deliberate — an agent that moves hardware unattended is a bad default.
+
 ## Rules (read before changing anything)
 
 1. **Do not upgrade the conversation app.** v0.8.0 is the last release with
@@ -199,7 +278,12 @@ not name**.
   every session, so a stale nickname outlives restarts and personality changes.
   Clear it in the control panel.
 - **`ask_agent` caps at 45s.** A deep crawl returns "still working", not an answer.
-  That is the timeout, not a broken integration.
+  That is the timeout, not a broken integration — and the spoken answer still
+  arrives later, because `say` does not depend on the `ask_agent` round trip.
+- **The robot plays the `waiting` emotion on a loop while a delegation runs**, so a
+  slow turn does not look like a crash. Disable with `REACHY_BUSY_MOTION=0`, or
+  swap the gesture with `REACHY_BUSY_MOVE=<emotion>` (`list_moves` for the 85
+  available).
 - **Editing anything in `tools/` needs an app restart.** Python caches imported
   modules, so a running app silently keeps using the old code — the edit looks
   like it did nothing.

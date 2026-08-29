@@ -61,6 +61,53 @@ TURN_TIMEOUT = float(os.getenv("TRUEFORGE_TURN_TIMEOUT", "45"))
 POLL_INTERVAL = 1.5
 
 
+# Physical "I am working on it" signal. Delegations routinely outlast the spoken
+# START line, and a motionless robot reads as a crashed one. Rather than author
+# motion, replay a stock emotion: the library already ships `waiting`, which is
+# exactly this gesture and runs ~10s, so it loops cleanly.
+DAEMON_URL = os.getenv("REACHY_DAEMON_URL", "http://127.0.0.1:8000").rstrip("/")
+BUSY_MOVE = os.getenv("REACHY_BUSY_MOVE", "waiting")
+BUSY_LIBRARY = "pollen-robotics/reachy-mini-emotions-library"
+BUSY_ENABLED = os.getenv("REACHY_BUSY_MOTION", "1").strip().lower() not in ("0", "false", "no")
+
+
+async def _busy_motion() -> None:
+    """Loop a waiting gesture until cancelled.
+
+    Cancellation is the only exit: the caller cancels this the moment the turn
+    resolves. Errors are swallowed deliberately -- a robot that cannot wiggle
+    must not break a delegation that is otherwise working.
+    """
+    url = f"{DAEMON_URL}/api/move/play/recorded-move-dataset/{BUSY_LIBRARY}/{BUSY_MOVE}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            while True:
+                try:
+                    await client.post(url)
+                except Exception:  # noqa: BLE001
+                    return  # daemon gone or move unavailable; stop trying
+                # The move runs ~10s server-side; re-issue as it finishes.
+                await asyncio.sleep(10.0)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _stop_busy(task: "asyncio.Task | None") -> None:
+    """Cancel the busy loop and settle the robot."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{DAEMON_URL}/api/move/stop")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _token_headers() -> Dict[str, str]:
     """Bearer header only when the server has OIDC login on; local mode needs none."""
     token = os.getenv("TRUEFORGE_TOKEN", "").strip()
@@ -236,6 +283,10 @@ class AskAgent(Tool):
                 r.raise_for_status()
                 turn_id = r.json()["data"]["id"]
 
+                # Only now, with a turn genuinely running, start moving. Doing it
+                # earlier would twitch on a failed session/turn create.
+                busy = asyncio.create_task(_busy_motion()) if BUSY_ENABLED else None
+
                 waited = 0.0
                 while waited < TURN_TIMEOUT:
                     await asyncio.sleep(POLL_INTERVAL)
@@ -249,6 +300,7 @@ class AskAgent(Tool):
                     status = state.get("status")
 
                     if status == "done":
+                        await _stop_busy(busy)
                         # A "done" turn carrying requiredActions is paused, not
                         # finished -- it wants an approval or an MCP login that
                         # nobody can give it from a voice conversation.
@@ -267,12 +319,14 @@ class AskAgent(Tool):
                         }
 
                     if status in ("failed", "cancelled"):
+                        await _stop_busy(busy)
                         return {
                             "status": status,
                             "spoken": f"The agent {status}.",
                             "detail": str(state.get("error"))[:300],
                         }
 
+                await _stop_busy(busy)
                 return {
                     "status": "still_running",
                     "session_id": session_id,
