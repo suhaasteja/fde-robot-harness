@@ -143,9 +143,20 @@ Leave `bright-data` deferred — it has many tools and preloading them all would
 bloat every prompt. That is the tradeoff deferred loading exists for: preload the
 few tools you want reached reflexively, defer the long tail.
 
-The instructions then tell it *when* to speak: one line before slow work, one
-sentence when the answer lands, both under fifteen words. Verified — the robot
-said "Checking Hacker News now." and then the headline.
+The instructions then tell it *when* to speak: before slow work, when it spawns a
+subagent, when the answer lands, and if something fails — never per tool call, which
+is unbearable to listen to.
+
+**Use `gpt-5-5`, not `gpt-5-4-mini`, for this agent.** The mini model could not hold
+the narration rules: it skipped announcements, and when it did speak it parroted the
+literal example phrasing from the instructions ("Checking the robot now.") while
+actually searching the web. `gpt-5-5` follows them reliably and writes fresh lines.
+That is a real cost difference per turn — but narration is the whole point of the
+robot knowing what it is doing, and the mini model cannot deliver it.
+
+Verified on a two-subagent task: 13 tool calls produced exactly 3 spoken lines —
+"I'll check Hacker News and Lobste.rs now.", "I'm sending two researchers to check
+both sites in parallel.", "Hacker News has the more technical top story today." 
 
 Or by API — see the git log for `807e6d6`, which has the exact `curl` calls. Note
 `POST /api/v1/agents` takes `{name, manifest}`, and **updates are by `agent_id`,
