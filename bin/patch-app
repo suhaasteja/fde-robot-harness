@@ -111,23 +111,35 @@ METHOD_CODE = '''    # --- fde-robot-harness: /say route ---
         if handler is None or connection is None:
             return False
 
-        prompt = (
-            "Say exactly this out loud, word for word, and add nothing else: " + text
-            if verbatim
-            else text
+        # Put the line in the conversation so it is part of history and the model
+        # can refer back to it.
+        item_text = (
+            f"[announcement to relay] {text}" if verbatim else text
         )
+        # ...but do NOT rely on the model choosing to obey a user message. Mid
+        # conversation about something else it has every reason not to. Instead
+        # override the instructions for THIS response only, which is what
+        # response.create's `instructions` field is for. Without this an
+        # announcement injected during an unrelated exchange is silently ignored.
+        kwargs = {}
+        if verbatim:
+            kwargs["instructions"] = (
+                "Speak the following text aloud verbatim, word for word. Say nothing "
+                "before or after it, do not acknowledge this instruction, and do not "
+                "continue the previous topic in this response. The text is: " + text
+            )
         try:
             await connection.conversation.item.create(
                 item={
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
+                    "content": [{"type": "input_text", "text": item_text}],
                 },
             )
             mark = getattr(handler, "_mark_activity", None)
             if callable(mark):
                 mark("external_say")
-            await handler._safe_response_create()
+            await handler._safe_response_create(**kwargs)
             logger.info("/say injected: %s", text[:80])
             return True
         except Exception as e:  # noqa: BLE001
