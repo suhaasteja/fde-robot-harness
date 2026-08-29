@@ -468,6 +468,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .merge-lock{margin-top:16px;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;
   border-radius:12px;background:#211b10;border:1px solid #684f20;color:#fbbf24;font-weight:700}
 .merge-lock.approved{background:#101f18;border-color:#28583d;color:#4ade80}
+.findings{margin-top:18px;background:#151823;border:1px solid #292f40;border-radius:18px;padding:22px}
+.finding-row{display:grid;grid-template-columns:160px 110px 1fr;gap:14px;padding:12px 0;border-top:1px solid #292f40;align-items:start}
+.finding-row:first-child{border-top:0}.finding-cve{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#e5e7eb}
+.finding-status{font-size:10px;font-weight:800;text-transform:uppercase;color:#93c5fd}.finding-status.applicable{color:#fb7185}
+.finding-reason{font-size:11px;color:#8992a7;line-height:1.45}
 @media(max-width:1000px){.incident-top{grid-template-columns:1fr}.stages{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <header>
@@ -490,7 +495,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <div class="severity" id="i-severity">WAITING</div>
       <h3 id="i-cve">Waiting for incident</h3>
       <p class="incident-summary" id="i-summary">TrueForge activity will appear here when an investigation begins.</p>
-      <div class="meta"><span>Service <b id="i-service">—</b></span><span>Source <b id="i-source">—</b></span><span>Fetched <b id="i-fetched">—</b></span><span>Monitor <b id="i-monitor">EVERY 5 MIN · STARTING</b></span></div>
+      <div class="meta"><span>Service <b id="i-service">—</b></span><span>Source <b id="i-source">—</b></span><span>Fetched <b id="i-fetched">—</b></span><span>Monitor <b id="i-monitor">EVERY 1 MIN · STARTING</b></span></div>
     </article>
     <aside class="engine-card">
       <div class="engine-title"><strong>TrueForge activity</strong><span class="live-dot">● LIVE EVIDENCE</span></div>
@@ -502,6 +507,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <div class="stages" id="stages"></div>
     <div class="merge-lock" id="merge-lock"><span>🔒 MERGE LOCKED</span><small>Waiting for verified work and human approval</small></div>
   </section>
+  <section class="findings"><div class="timeline-head"><h2>Recently evaluated</h2><span class="sha" id="finding-count">0 CVEs</span></div><div id="finding-list"><div class="empty">Waiting for first repository scan.</div></div></section>
 </div>
 <div id="tfwrap" style="display:none">
   <div id="tfnone" class="empty" style="padding:40px 20px">
@@ -715,9 +721,12 @@ async function refreshIncident(){
   $('#i-service').textContent=s.service||'—';$('#i-source').textContent=s.source||'—';
   $('#i-fetched').textContent=s.fetched_at||'—';$('#i-sha').textContent=s.commit?`COMMIT ${s.commit}`:'NO COMMIT';
   const monitor=s.monitor||{};
-  let monitorText=`EVERY ${Math.round((monitor.interval_seconds||300)/60)} MIN · ${(monitor.status||'starting').replaceAll('_',' ').toUpperCase()}`;
+  let monitorText=`EVERY ${Math.round((monitor.interval_seconds||60)/60)} MIN · ${(monitor.status||'starting').replaceAll('_',' ').toUpperCase()}`;
   if(monitor.next_check_at){const left=Math.max(0,Math.ceil((Date.parse(monitor.next_check_at)-Date.now())/1000));monitorText+=` · NEXT ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;}
   $('#i-monitor').textContent=monitorText;
+  const findings=monitor.findings||[];
+  $('#finding-count').textContent=`${findings.length} CVE${findings.length===1?'':'s'}`;
+  $('#finding-list').innerHTML=findings.length?findings.map(f=>`<div class="finding-row"><span class="finding-cve">${esc(f.cve)}</span><span class="finding-status ${f.status==='applicable'?'applicable':''}">${esc(f.status)}</span><span class="finding-reason">${esc(f.reason)}</span></div>`).join(''):'<div class="empty">Waiting for first repository scan.</div>';
   const sev=(s.severity||'unknown').toUpperCase();$('#i-severity').textContent=sev;
   $('#i-severity').style.visibility=sev==='UNKNOWN'?'hidden':'visible';
   const tests=s.tests||{},q=s.qodo||{},approval=s.approval||{},merge=s.merge||{};

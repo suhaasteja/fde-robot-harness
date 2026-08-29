@@ -25,7 +25,7 @@ panel:
 	@bin/reachy-app panel
 
 monitor:
-	@bin/cve-monitor --interval 300
+	@bin/cve-monitor --interval 60
 
 daemon:
 	@bin/reachy-app daemon
