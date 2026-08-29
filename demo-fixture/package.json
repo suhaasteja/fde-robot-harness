@@ -6,6 +6,6 @@
     "test": "node --test"
   },
   "dependencies": {
-    "next": "15.2.2"
+    "next": "15.2.3"
   }
 }
