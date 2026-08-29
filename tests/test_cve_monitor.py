@@ -50,6 +50,19 @@ VERDICT: APPLICABLE CVE-2026-1111"""
         self.assertIn("--- a/package.json", result)
         self.assertIn("+++ b/package.json", result)
 
+    def test_discovery_announcement_credits_each_system_without_claiming_review(self):
+        speech = monitor.discovery_announcement("CVE-2026-1111")
+        self.assertIn("Bright Data found", speech)
+        self.assertIn("TrueForge confirmed", speech)
+        self.assertIn("Qodo has not approved anything yet", speech)
+
+    def test_ready_announcement_binds_qodo_and_approval_to_exact_commit(self):
+        speech = monitor.ready_announcement("CVE-2026-1111", "abcdef123456")
+        self.assertIn("Bright Data found", speech)
+        self.assertIn("TrueForge confirmed", speech)
+        self.assertIn("Qodo reviewed the exact commit abcdef1", speech)
+        self.assertIn("approve merging commit abcdef1", speech)
+
 
 if __name__ == "__main__":
     unittest.main()
