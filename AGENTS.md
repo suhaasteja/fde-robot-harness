@@ -30,7 +30,14 @@ robot ──ask_agent──> TrueForge :8790        (voice reaches Bright Data, 
 **Prerequisites:** macOS, Homebrew Python 3.12, Node ≥ 22.14, and a venv at
 `~/reachy-conv`. The robot itself is **optional** — see [Without a robot](#without-a-robot).
 
-If `~/reachy-conv` does not exist:
+```bash
+bin/setup            # build the venv, verify the pins, apply the /say patch
+bin/setup --check    # report what is installed, change nothing
+```
+
+The conversation app is **not vendored here** — it is upstream, installed from a
+pinned git tag (`v0.8.0`). `bin/setup` does it and then *verifies* the versions
+actually landed, failing loudly if they did not:
 
 ```bash
 /opt/homebrew/bin/python3.12 -m venv ~/reachy-conv
@@ -42,7 +49,12 @@ uv pip install --python ~/reachy-conv/bin/python \
 Expect `reachy-mini 1.9.0` and `reachy-mini-conversation-app 0.8.0`. Anything else
 means the pin drifted — see the Rules.
 
-**`.env` is not committed** (it holds an API key). Create it in the repo root:
+Re-run `bin/setup` after **any** reinstall or upgrade. Installing the app
+overwrites `console.py` and silently removes the `/say` route, so setup installs
+first and patches second.
+
+**`.env` is not committed** (it holds an API key). `bin/setup` creates one from
+`.env.example`; you only need to add the key. For reference:
 
 ```bash
 BACKEND_PROVIDER=openai

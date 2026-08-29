@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# setup — build the pinned venv this repo expects, and verify it.
+#
+# The conversation app is NOT vendored here; it is upstream, installed from a
+# specific git tag. The tag matters more than it looks: see the Rules in
+# AGENTS.md before changing either pin.
+#
+#   bin/setup            # create/repair the venv, then apply the /say patch
+#   bin/setup --check    # report what is installed, change nothing
+#
+# Safe to re-run. Nothing is uninstalled without saying so.
+
+set -uo pipefail
+
+VENV="${REACHY_VENV:-$HOME/reachy-conv}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Deliberate pins. reachy-mini must stay <1.10 (the Control app still bundles
+# 1.9.x for the daemon), and the conversation app must stay 0.8.0 -- 0.9.0
+# removed multi-backend support, so a newer one silently drops you back to the
+# Hugging Face backend with only a warning.
+SDK_SPEC="reachy-mini<1.10"
+APP_TAG="v0.8.0"
+APP_SPEC="reachy_mini_conversation_app @ git+https://github.com/pollen-robotics/reachy_mini_conversation_app.git@${APP_TAG}"
+EXPECT_SDK="1.9.0"
+EXPECT_APP="0.8.0"
+
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_yel" "$c_off" "$*"; }
+err()  { printf '%s✗%s %s\n' "$c_red" "$c_off" "$*" >&2; }
+dim()  { printf '%s%s%s\n' "$c_dim" "$*" "$c_off"; }
+
+version_of() {
+  "$VENV/bin/python" -c "import importlib.metadata as m;print(m.version('$1'))" 2>/dev/null || echo "-"
+}
+
+report() {
+  local sdk app
+  sdk="$(version_of reachy-mini)"
+  app="$(version_of reachy-mini-conversation-app)"
+  [ "$sdk" = "$EXPECT_SDK" ] && ok "reachy-mini $sdk" || warn "reachy-mini $sdk (expected $EXPECT_SDK)"
+  [ "$app" = "$EXPECT_APP" ] && ok "conversation app $app" || warn "conversation app $app (expected $EXPECT_APP)"
+  bin/patch-app --check 2>/dev/null | sed 's/^/  /'
+}
+
+if [ "${1:-}" = "--check" ]; then
+  [ -x "$VENV/bin/python" ] || { err "No venv at $VENV — run bin/setup"; exit 1; }
+  report
+  exit 0
+fi
+
+# --- prerequisites ---------------------------------------------------------
+
+PY=""
+for c in /opt/homebrew/bin/python3.12 "$(command -v python3.12 || true)"; do
+  [ -n "$c" ] && [ -x "$c" ] && { PY="$c"; break; }
+done
+if [ -z "$PY" ]; then
+  err "Python 3.12 not found."
+  dim "  brew install python@3.12"
+  exit 1
+fi
+ok "python3.12: $PY"
+
+INSTALL=(uv pip install --python "$VENV/bin/python")
+if ! command -v uv >/dev/null 2>&1; then
+  warn "uv not found; falling back to the venv's pip (slower)."
+  INSTALL=("$VENV/bin/pip" install)
+fi
+
+# --- venv ------------------------------------------------------------------
+
+if [ ! -x "$VENV/bin/python" ]; then
+  "$PY" -m venv "$VENV" || { err "Could not create $VENV"; exit 1; }
+  ok "created venv at $VENV"
+else
+  ok "venv exists at $VENV"
+fi
+
+# Never a bare `pip install`: the default shell here sits in conda base, and an
+# untargeted install silently overwrites conda-managed packages.
+echo
+dim "Installing pinned versions (this pulls the app from a git tag)..."
+"${INSTALL[@]}" "$SDK_SPEC" "$APP_SPEC" >/dev/null 2>&1 || {
+  err "Install failed. Re-run without redirection to see why:"
+  dim "  ${INSTALL[*]} \"$SDK_SPEC\" \"$APP_SPEC\""
+  exit 1
+}
+
+echo
+sdk="$(version_of reachy-mini)"
+app="$(version_of reachy-mini-conversation-app)"
+[ "$sdk" = "$EXPECT_SDK" ] && ok "reachy-mini $sdk" || { err "reachy-mini $sdk, expected $EXPECT_SDK"; exit 1; }
+[ "$app" = "$EXPECT_APP" ] && ok "conversation app $app" || { err "conversation app $app, expected $EXPECT_APP"; exit 1; }
+
+# --- /say patch ------------------------------------------------------------
+
+echo
+if REACHY_VENV="$VENV" "$REPO_ROOT/bin/patch-app" >/dev/null 2>&1; then
+  ok "/say route patched in"
+else
+  warn "/say patch did not apply — 'say' will return say_not_available."
+  dim "  Run bin/patch-app to see the error."
+fi
+
+# --- .env ------------------------------------------------------------------
+
+echo
+if [ -f "$REPO_ROOT/.env" ]; then
+  ok ".env exists (not overwritten)"
+else
+  sed "s|__REPO__|$REPO_ROOT|" "$REPO_ROOT/.env.example" > "$REPO_ROOT/.env"
+  chmod 600 "$REPO_ROOT/.env"
+  ok "created .env from .env.example"
+  warn "Add your OPENAI_API_KEY to $REPO_ROOT/.env before starting the app."
+fi
+
+cat <<EOF
+
+Next:
+  1. Put your OPENAI_API_KEY in .env
+  2. Start the daemon:  ~/reachy-conv/bin/reachy-mini-daemon
+     (no robot? add --mockup-sim --headless)
+  3. Start the app, FROM THIS DIRECTORY so .env is found:
+       $VENV/bin/reachy-mini-conversation-app --ui
+  4. TrueForge, if you want the agent side:  npx @truefoundry/trueforge@latest
+
+See AGENTS.md for the TrueForge wiring and the rules behind the version pins.
+EOF
