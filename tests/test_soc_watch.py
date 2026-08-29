@@ -71,6 +71,15 @@ class ApprovalGateTests(unittest.TestCase):
             soc_watch.classify_decision("No, hold commit 7f3a21c", "7f3a21c"),
             "denied",
         )
+        self.assertEqual(soc_watch.classify_decision("I know the answer", "7f3a21c"), "ambiguous")
+
+    def test_invalidated_evidence_revokes_local_approval(self):
+        state = self.ready_state()
+        state["approval"]["status"] = "approved"
+        state["tests"]["status"] = "failed"
+        soc_watch.enforce_gate(state)
+        self.assertEqual(state["approval"]["status"], "locked")
+        self.assertEqual(state["merge"]["status"], "locked")
 
 
 if __name__ == "__main__":

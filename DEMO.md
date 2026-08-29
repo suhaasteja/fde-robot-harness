@@ -22,21 +22,27 @@ Approval has no *weight*. We give it weight by making it physical.
 ## Architecture
 
 ```
-  Bright Data                TrueForge (:8790)              Reachy Mini
+  Bright Data                TrueForge (:8790)                 Qodo
   ───────────                ─────────────────              ───────────
   CVE feeds        ──┐                                   ┌─ speaks the alert
   vendor advisories  ├──►  agent session                 │  (antennae + head turn)
   breach forums      │     ├─ scan dependencies          │
   release notes    ──┘     ├─ write patch  ┐             │
                            ├─ run tests    ├─ sandbox    │
-                           └─ subagent audit┘            │
-                                  │                       │
-                                  ▼                       │
-                        HUMAN APPROVAL CHECKPOINT ◄───────┘
-                                  │                    spoken confirmation
-                                  │                    parsed from app.log
-                                  ▼
-                            Qodo review  ──►  merge to main
+                           └─ subagent audit┘                 │
+                                  │                           ▼
+                                  └──────────────────► PR review
+                                                               │
+                                  Reachy Mini                   │
+                                  ───────────                   │
+                                  speaks alert ◄────────────────┘
+                                  captures named approval
+                                           │
+                                           ▼
+                                HUMAN APPROVAL CHECKPOINT
+                                           │
+                                           ▼
+                                      merge to main
 ```
 
 Data flows one way until the checkpoint. Nothing merges without a voice from the room.
@@ -51,12 +57,13 @@ Data flows one way until the checkpoint. Nothing merges without a voice from the
 | Conversation app | 7860 | **built** | `bin/reachy-app start --ui` |
 | Control panel | 7870 | **built** | `bin/control-panel` — prompt, transcript, memory |
 | TrueForge agent server | 8790 | **built** (upstream) | `npx @truefoundry/trueforge` |
-| Bright Data MCP | — | **to build** | register into TrueForge |
-| `bin/soc-watch` | — | **to build** | poll TrueForge → drive Reachy |
-| Approval parser | — | **to build** | tail `logs/app.log` for the phrase |
-| Qodo gate | — | **to build** | PR review before merge |
+| Bright Data MCP | — | **configured** | authenticated read-only connector in TrueForge |
+| `bin/soc-watch` | — | **built** | TrueForge + GitHub/Qodo evidence bridge |
+| Approval parser | — | **built** | fail-closed, exact-SHA parsing from `logs/app.log` |
+| Qodo gate | — | **in validation** | initial review complete; fixture follow-up queued |
 
-The four "to build" rows are the demo's actual work. Everything else already runs.
+The software path is built. The remaining pre-shoot checks are Qodo's follow-up review on
+the corrected fixture and the final Reachy hardware connection.
 
 ---
 
@@ -231,8 +238,9 @@ may watch the first pass on a small screen.
 | **NVIDIA DGX Spark — Best Use of TrueForge** | TrueForge visibly owns real MCP calls, generated code in an isolated sandbox, human approval before an irreversible action, subagent delegation, and session continuity across reconnects | Beats 1–3 show every capability; Beat 3 turns the required approval into a memorable physical interaction |
 | **AirPods 4** | **Not listed on the official hackathon rules/prize page reviewed on 2026-08-29. Confirm the in-room award and criteria with an organizer before optimizing for it.** | Reachy's embodied voice interaction is likely strong for a creativity/experience award, but this is not a verified submission track |
 
-**Verdict:** this is a credible DGX contender, but not yet a winning submission while the
-four integration rows remain “to build.” The idea is stronger than a standard incident
+**Verdict:** this is a credible DGX contender now that the core TrueForge run is real and
+captured; final readiness depends on the Qodo follow-up and Reachy hardware rehearsal. The
+idea is stronger than a standard incident
 responder because the physical, named, audible approval makes safety legible in seconds.
 It will lose on technical excellence if the merge is simulated, if TrueForge merely sits
 behind `soc-watch`, or if reconnect persistence is only narrated. Make each one observable.

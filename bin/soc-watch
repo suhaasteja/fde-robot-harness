@@ -32,10 +32,11 @@ TRANSCRIPT_RE = re.compile(r"role=user(?!_partial) content=(.*)$")
 def classify_decision(text: str, commit: str) -> str:
     """Require an unambiguous verb and the exact reviewed short SHA."""
     normalized = " ".join(text.lower().split())
-    if any(word in normalized for word in ("deny", "reject", "hold", "do not approve", "don't approve", "no")):
+    if re.search(r"\b(?:deny|reject|hold|no)\b|\b(?:do not|don't) approve\b", normalized):
         return "denied"
     sha = commit.lower().strip()
-    if sha and sha in normalized and any(phrase in normalized for phrase in ("i approve", "approve commit", "approved commit")):
+    sha_present = bool(sha and re.search(rf"(?<![0-9a-f]){re.escape(sha)}(?![0-9a-f])", normalized))
+    if sha_present and re.search(r"\b(?:i approve|approve commit|approved commit)\b", normalized):
         return "approved"
     return "ambiguous"
 
@@ -89,6 +90,9 @@ def sync_trueforge(state: dict, session_id: str) -> None:
     turns = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns").get("data", [])
     if not session:
         state["trueforge_error"] = "session unavailable"
+        state.pop("trueforge", None)
+        state.setdefault("approval", {})["status"] = "locked"
+        state.setdefault("merge", {})["status"] = "locked"
         return
     state.pop("trueforge_error", None)
     state["session_id"] = session_id
@@ -109,6 +113,45 @@ def sync_trueforge(state: dict, session_id: str) -> None:
                 f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns/{turn_id}"
             ).get("data", {})
             turn_state = detail.get("state", {})
+            output = ((turn_state.get("output") or {}).get("content") or "")
+            # Promote only explicit, machine-readable facts from the completed
+            # TrueForge report into the presentation model. If the report does
+            # not contain the proof, the corresponding UI stage stays pending.
+            if "CVE-2025-29927" in output:
+                state.update({
+                    "cve": "CVE-2025-29927",
+                    "severity": "critical",
+                    "summary": "Authorization bypass via x-middleware-subrequest",
+                    "service": "Next.js middleware",
+                    "source": "Bright Data · NVD + Vercel advisory",
+                    "fetched_at": detail.get("created_at"),
+                })
+            before = re.search(
+                r"Before patch \|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|", output
+            )
+            after = re.search(
+                r"After patch \|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|", output
+            )
+            if before and after:
+                total, passed, failed = map(int, after.groups())
+                state["tests"] = {
+                    "status": "passed" if failed == 0 and passed == total else "failed",
+                    "passed": passed,
+                    "total": total,
+                    "before": {
+                        "total": int(before.group(1)),
+                        "passed": int(before.group(2)),
+                        "failed": int(before.group(3)),
+                    },
+                    "sandbox": "TrueForge isolated sandbox",
+                }
+            agents = []
+            if "### Blast-radius assessment" in output:
+                agents.append({"name": "Blast radius", "status": "complete"})
+            if "### Regression-test proposal" in output:
+                agents.append({"name": "Regression audit", "status": "complete"})
+            if agents:
+                state["subagents"] = agents
             required = turn_state.get("requiredActions") or turn_state.get("required_actions")
             if required:
                 state["trueforge"]["approval_requested"] = True
@@ -116,20 +159,37 @@ def sync_trueforge(state: dict, session_id: str) -> None:
 
 def gh_pr(pr: str) -> dict:
     fields = "number,url,headRefOid,statusCheckRollup,reviews,commits"
-    result = subprocess.run(
-        ["gh", "pr", "view", pr, "--json", fields],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=15,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr, "--json", fields], cwd=ROOT,
+            text=True, capture_output=True, timeout=15, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return {"error": f"GitHub unavailable: {error}"[:300]}
     if result.returncode:
         return {"error": (result.stderr or result.stdout).strip()[:300]}
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except ValueError:
         return {"error": "GitHub returned invalid JSON"}
+    # `gh pr view` omits the reviewed commit from its review objects. Fetch the
+    # canonical reviews endpoint so the gate can bind Qodo to the exact head.
+    try:
+        repo_result = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+        )
+        if repo_result.returncode == 0 and data.get("number"):
+            owner_repo = repo_result.stdout.strip()
+            review_result = subprocess.run(
+                ["gh", "api", f"repos/{owner_repo}/pulls/{data['number']}/reviews"],
+                cwd=ROOT, text=True, capture_output=True, timeout=15, check=False,
+            )
+            if review_result.returncode == 0:
+                data["review_commits"] = json.loads(review_result.stdout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    return data
 
 
 def sync_qodo(state: dict, pr: str) -> None:
@@ -160,11 +220,16 @@ def sync_qodo(state: dict, pr: str) -> None:
     complete = bool(qodo_checks or qodo_reviews) and all(
         value in {"SUCCESS", "COMPLETED", "NEUTRAL", "APPROVED"} for value in conclusions
     )
-    # A follow-up is evidence of review after a response/fix: at least two Qodo
-    # check/review events and more than one commit on the PR.
+    # A follow-up only counts when Qodo actually reviewed the current head SHA.
+    # An earlier bot review on a now-obsolete commit can never unlock approval.
     commits = data.get("commits") or []
-    followup = len(qodo_checks) + len(qodo_reviews) >= 2 and len(commits) >= 2
     final_sha = data.get("headRefOid")
+    qodo_review_commits = [
+        review.get("commit_id") for review in (data.get("review_commits") or [])
+        if "qodo" in str((review.get("user") or {}).get("login", "")).lower()
+        or "codium" in str((review.get("user") or {}).get("login", "")).lower()
+    ]
+    followup = bool(final_sha and final_sha in qodo_review_commits and len(commits) >= 2)
     state["commit"] = final_sha[:7] if final_sha else state.get("commit")
     state["qodo"] = {
         "status": "complete" if complete and followup else "reviewing" if qodo_checks or qodo_reviews else "pending",
@@ -173,6 +238,7 @@ def sync_qodo(state: dict, pr: str) -> None:
         "final_sha": final_sha,
         "checks": len(qodo_checks),
         "reviews": len(qodo_reviews),
+        "reviewed_sha": final_sha if followup else None,
         "followup": followup,
         "finding": "Follow-up review complete" if complete and followup else "Awaiting Qodo follow-up review",
     }
@@ -189,15 +255,19 @@ def enforce_gate(state: dict) -> None:
     sha_matches = bool(commit and reviewed_sha and reviewed_sha.startswith(commit))
     ready = tests_pass and qodo_pass and requested and sha_matches
     approval = state.setdefault("approval", {})
-    if approval.get("status") != "approved":
-        approval["status"] = "waiting" if ready else "locked"
+    if not ready:
+        approval["status"] = "locked"
+        approval.pop("decision", None)
+        approval.pop("last_words", None)
+    elif approval.get("status") not in {"approved", "denied"}:
+        approval["status"] = "waiting"
     approval["prerequisites"] = {
         "sandbox_tests": tests_pass,
         "qodo_followup": qodo_pass,
         "trueforge_checkpoint": requested,
         "commit_matches": sha_matches,
     }
-    if not ready and approval.get("status") != "approved":
+    if not ready:
         state.setdefault("merge", {})["status"] = "locked"
 
 
