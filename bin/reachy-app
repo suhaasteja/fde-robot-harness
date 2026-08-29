@@ -272,7 +272,7 @@ usage() {
 usage: $(basename "$0") <command> [-- app args]
 
   start [args]   Launch the conversation app (background, logged)
-  stop           Graceful shutdown (SIGINT -> TERM -> KILL)
+  stop           Graceful shutdown (SIGTERM, escalating to KILL)
   restart        stop, then start
   status         Is it running? Is the daemon up? What versions?
   doctor         Verify pins and report whether the dashboard is usable yet
