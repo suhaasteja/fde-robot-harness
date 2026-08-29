@@ -490,7 +490,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <div class="severity" id="i-severity">WAITING</div>
       <h3 id="i-cve">Waiting for incident</h3>
       <p class="incident-summary" id="i-summary">TrueForge activity will appear here when an investigation begins.</p>
-      <div class="meta"><span>Service <b id="i-service">—</b></span><span>Source <b id="i-source">—</b></span><span>Fetched <b id="i-fetched">—</b></span></div>
+      <div class="meta"><span>Service <b id="i-service">—</b></span><span>Source <b id="i-source">—</b></span><span>Fetched <b id="i-fetched">—</b></span><span>Monitor <b id="i-monitor">EVERY 5 MIN · STARTING</b></span></div>
     </article>
     <aside class="engine-card">
       <div class="engine-title"><strong>TrueForge activity</strong><span class="live-dot">● LIVE EVIDENCE</span></div>
@@ -714,6 +714,10 @@ async function refreshIncident(){
   $('#i-summary').textContent=s.summary||'No active security advisory';
   $('#i-service').textContent=s.service||'—';$('#i-source').textContent=s.source||'—';
   $('#i-fetched').textContent=s.fetched_at||'—';$('#i-sha').textContent=s.commit?`COMMIT ${s.commit}`:'NO COMMIT';
+  const monitor=s.monitor||{};
+  let monitorText=`EVERY ${Math.round((monitor.interval_seconds||300)/60)} MIN · ${(monitor.status||'starting').replaceAll('_',' ').toUpperCase()}`;
+  if(monitor.next_check_at){const left=Math.max(0,Math.ceil((Date.parse(monitor.next_check_at)-Date.now())/1000));monitorText+=` · NEXT ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;}
+  $('#i-monitor').textContent=monitorText;
   const sev=(s.severity||'unknown').toUpperCase();$('#i-severity').textContent=sev;
   $('#i-severity').style.visibility=sev==='UNKNOWN'?'hidden':'visible';
   const tests=s.tests||{},q=s.qodo||{},approval=s.approval||{},merge=s.merge||{};

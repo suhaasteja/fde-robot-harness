@@ -62,6 +62,20 @@ def get_json(url: str) -> dict:
         return {}
 
 
+def post_json(url: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        return {}
+
+
 def atomic_write(value: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="incident-", suffix=".json", dir=STATE_FILE.parent)
@@ -294,11 +308,71 @@ def sync_voice_decision(state: dict) -> None:
         state.setdefault("merge", {})["status"] = "locked"
 
 
+def release_trueforge_checkpoint(state: dict) -> bool:
+    """Send the spoken answer into TrueForge's pending ask-user tool call."""
+    session_id = state.get("session_id")
+    words = (state.get("approval") or {}).get("last_words")
+    if not session_id or not words:
+        return False
+    turns = get_json(f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns").get("data", [])
+    for turn in reversed(turns if isinstance(turns, list) else []):
+        for action in reversed((turn.get("state") or {}).get("required_actions") or []):
+            if action.get("type") != "tool.response_required":
+                continue
+            tool_calls = action.get("tool_calls") or []
+            if not tool_calls:
+                continue
+            result = post_json(
+                f"{TRUEFORGE}/api/v1/sessions/{session_id}/turns",
+                {
+                    "input": [{
+                        "type": "user.tool_response",
+                        "thread_id": action.get("thread_id", "main"),
+                        "tool_call_id": tool_calls[0].get("id"),
+                        "content": words,
+                    }],
+                    "previous_turn_id": turn.get("id"),
+                    "stream": False,
+                },
+            )
+            if result.get("data"):
+                state["approval"]["trueforge_released"] = True
+                return True
+    return False
+
+
+def merge_reviewed_pr(state: dict, pr: str) -> None:
+    """Merge only the exact approved and Qodo-reviewed Git head."""
+    approval = state.get("approval") or {}
+    qodo = state.get("qodo") or {}
+    merge = state.setdefault("merge", {})
+    if approval.get("status") != "approved" or not approval.get("trueforge_released"):
+        return
+    sha = str(qodo.get("final_sha") or "")
+    if not sha or qodo.get("reviewed_sha") != sha:
+        approval["status"] = "locked"
+        merge["status"] = "locked"
+        return
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "merge", pr, "--merge", "--match-head-commit", sha],
+            cwd=ROOT, text=True, capture_output=True, timeout=30, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        merge.update(status="failed", error=str(error)[:300])
+        return
+    if result.returncode == 0:
+        merge.update(status="merged", sha=sha, pr=pr)
+    else:
+        merge.update(status="failed", error=(result.stderr or result.stdout).strip()[:300])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", help="TrueForge session id")
     parser.add_argument("--pr", help="GitHub PR URL, number, or OWNER/REPO#NUMBER")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--merge", action="store_true", help="merge after native checkpoint release")
     parser.add_argument("--interval", type=float, default=2.0)
     args = parser.parse_args()
     if not args.session and not args.pr:
@@ -312,6 +386,10 @@ def main() -> None:
             sync_qodo(state, args.pr)
         enforce_gate(state)
         sync_voice_decision(state)
+        if args.merge and (state.get("approval") or {}).get("status") == "approved":
+            if not (state.get("approval") or {}).get("trueforge_released"):
+                release_trueforge_checkpoint(state)
+            merge_reviewed_pr(state, args.pr)
         atomic_write(state)
         print(json.dumps({"session": state.get("session_id"), "qodo": state.get("qodo")}, indent=2))
         if args.once:
