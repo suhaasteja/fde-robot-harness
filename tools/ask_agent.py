@@ -197,12 +197,18 @@ class AskAgent(Tool):
         logger.info("Tool call: ask_agent agent=%r question=%r", agent_name, question[:120])
         headers = {"Content-Type": "application/json", **_token_headers()}
 
-        # Spoken context first, so the TrueForge thread reads as a conversation
-        # rather than a bare instruction with no provenance.
+        # The "Spoken context:" prefix is what tells the agent this request came
+        # from someone standing in front of the robot, which is what triggers its
+        # narration rules. It must go on EVERY delegation: `context` is optional
+        # and the model frequently omits it, so keying the prefix off it meant the
+        # robot silently stopped narrating exactly when a real person was waiting.
         context = kwargs.get("context")
-        message = question
-        if isinstance(context, str) and context.strip():
-            message = f"Spoken context: {context.strip()}\n\nTask: {question}"
+        spoken = (
+            context.strip()
+            if isinstance(context, str) and context.strip()
+            else "The user asked the robot this out loud and is waiting for an answer."
+        )
+        message = f"Spoken context: {spoken}\n\nTask: {question}"
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
