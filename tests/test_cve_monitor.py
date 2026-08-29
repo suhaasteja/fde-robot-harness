@@ -52,16 +52,20 @@ VERDICT: APPLICABLE CVE-2026-1111"""
 
     def test_discovery_announcement_credits_each_system_without_claiming_review(self):
         speech = monitor.discovery_announcement("CVE-2026-1111")
-        self.assertIn("Bright Data found", speech)
+        self.assertIn("Bright Data sourced", speech)
         self.assertIn("TrueForge confirmed", speech)
-        self.assertIn("Qodo has not approved anything yet", speech)
+        self.assertIn("Qodo exact-commit review is the next required gate", speech)
 
     def test_ready_announcement_binds_qodo_and_approval_to_exact_commit(self):
         speech = monitor.ready_announcement("CVE-2026-1111", "abcdef123456")
-        self.assertIn("Bright Data found", speech)
+        self.assertIn("Bright Data sourced", speech)
         self.assertIn("TrueForge confirmed", speech)
-        self.assertIn("Qodo reviewed the exact commit abcdef1", speech)
-        self.assertIn("approve merging commit abcdef1", speech)
+        self.assertIn("Qodo reviewed exact commit abcdef1", speech)
+        self.assertIn("approve commit abcdef1", speech)
+
+    def test_spoken_briefing_defines_the_vulnerability(self):
+        speech = monitor.ready_announcement("CVE-2026-45109", "abcdef123456")
+        self.assertIn("bypass Next.js middleware authorization", speech)
 
 
 if __name__ == "__main__":
