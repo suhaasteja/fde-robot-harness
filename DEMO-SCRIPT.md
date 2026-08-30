@@ -80,29 +80,36 @@ than a prop, and it sets up the payoff in Act 4 where it uses both facts.
 **Do:** show the TrueForge session (`bin/demo status` prints the URL). Expand
 *Agent steps*.
 
+⭐ **This act carries the TrueForge and Bright Data submission answers.**
+
 **Say:**
 
-> "Ten minutes ago this ran on a timer. No one asked it to.
+> "Ten minutes ago this ran on a timer. Nobody asked it to.
 >
-> TrueForge reached a real Bright Data MCP tool and found the public advisory.
+> A **TrueForge** agent reached a real **Bright Data** MCP tool and found the
+> public advisory — that's the live web, not a fixture. Then it searched our own
+> codebase through a second MCP server we built, and confirmed the vulnerable
+> pattern was actually present in our middleware.
+>
 > It reproduced the issue, wrote the smallest patch, and ran the tests **inside
-> its own sandbox** — not on my machine. Tests went from one failing to all
-> passing.
+> TrueForge's isolated sandbox** — not on my machine. One failing security test
+> to all passing.
 >
-> Then it delegated: two subagents, one on blast radius, one on regression
-> coverage. Both came back."
+> Then it delegated: two **subagents**, one on blast radius, one on regression
+> coverage. Both came back with different, useful conclusions."
 
-**Point at:** the `bright-data` tool call, the sandbox test table, the two
-subagent threads. These are native TrueForge screens — do not narrate over a
-diagram, show the real thing.
+**Point at, in this order:** the `bright-data` call → the `codebase` search →
+the sandbox test table → the two subagent threads. These are native TrueForge
+screens — show the real thing, never a diagram.
 
 **Say:**
 
-> "It opened a pull request. Qodo reviewed it — and Qodo had to review *this exact
-> commit*, not an earlier one. A stale review on an obsolete SHA cannot unlock
-> anything."
+> "It opened a pull request, and **Qodo** reviewed it."
 
-**Point at:** the PR, Qodo's review, the SHA.
+**Do:** switch to the GitHub PR. Show Qodo's review and the commit SHA.
+
+> "And Qodo had to review *this exact commit*, not an earlier one. A stale review
+> on an obsolete SHA cannot unlock anything."
 
 ---
 
@@ -228,11 +235,28 @@ by our code.
 
 **Say:**
 
-> "Bright Data found it. TrueForge patched, tested, and delegated it. Qodo
-> reviewed it. And a robot made sure a human said yes out loud before anything
-> irreversible happened.
+> "Bright Data found it on the live web. TrueForge confirmed it against our code,
+> patched it, tested it in a sandbox, and delegated the analysis to subagents.
+> Qodo reviewed the exact commit. And a robot made sure a named human said yes
+> out loud before anything irreversible happened.
 >
-> Autonomy you can stop."
+> Physical SOC. Autonomy you can stop."
+
+---
+
+## Submission answers — where each is spoken
+
+Everything the form asks for is said aloud somewhere in the demo, so the video
+covers it without a separate explainer.
+
+| Form question | Covered in |
+|---|---|
+| What does your project do | Act 1 opening + Act 6 close |
+| How did you use TrueForge | Act 2 (sandbox, subagents, MCP) + Act 3 (the checkpoint) |
+| How did you use Bright Data | Act 2 — "the live web, not a fixture" |
+| How did you use Qodo | Act 2 end + Act 4a — review bound to the exact SHA |
+
+Full written answers: [SUBMISSION.md](SUBMISSION.md).
 
 ---
 
