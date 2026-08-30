@@ -176,8 +176,11 @@ not name**.
 
 ## Running the demo
 
-**→ See [RUNBOOK.md](RUNBOOK.md)** — the five services, both demo flows, what the
-robot should say, the approve/deny script, and how to restart anything you close.
+- **[DEMO-SCRIPT.md](DEMO-SCRIPT.md)** — what to say and do, beat by beat, for a
+  live audience. Includes the pre-warm, the failure lines, and the questions
+  judges ask.
+- **[RUNBOOK.md](RUNBOOK.md)** — operational reference: the five services, both
+  flows, and how to restart anything you close.
 
 ```bash
 bin/demo check | reset | scan | gate | status
