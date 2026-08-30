@@ -174,6 +174,15 @@ Or by API — see the git log for `807e6d6`, which has the exact `curl` calls. N
 `POST /api/v1/agents` takes `{name, manifest}`, and **updates are by `agent_id`,
 not name**.
 
+## Running the demo
+
+**→ See [RUNBOOK.md](RUNBOOK.md)** — the five services, both demo flows, what the
+robot should say, the approve/deny script, and how to restart anything you close.
+
+```bash
+bin/demo check | reset | scan | gate | status
+```
+
 ## Integrating with another TrueForge setup
 
 **→ See [INTEGRATE.md](INTEGRATE.md)** for the full walkthrough: setup, connector
