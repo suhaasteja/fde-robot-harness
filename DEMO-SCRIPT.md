@@ -7,6 +7,56 @@ this is what you *say* and *do*, in order.
 
 ---
 
+## Recording it on a phone
+
+You have the laptop and robot side by side. Two things follow from that:
+
+**Laptop text will not be readable on phone video.** Do not rely on the screen to
+make a point — narrate every number you want a judge to know. "Four conditions,
+three pass, one fails" beats pointing at a terminal they cannot read. Frame so the
+screen is *visible* (it proves the thing is real) but never *load-bearing*.
+
+**Frame the robot as the subject.** Chest height, robot slightly left of centre,
+laptop screen behind or beside it. When it speaks, hold still — its antennae and
+head move before the audio starts, and that motion is what makes people look at it.
+
+**Audio is the whole demo.** Get the phone within a metre of the robot and keep the
+room quiet. Speak your own lines toward the phone, not the laptop. If the room is
+noisy the robot will interrupt itself mid-sentence — it hears the noise as you
+starting to talk.
+
+**Record it in one take if you can.** A cut between "I approve commit 6d12418" and
+the gate turning green invites the question of whether anything happened in
+between.
+
+Two things to check before you hit record:
+
+```bash
+bin/demo check                       # all green
+curl -s localhost:7860/mic           # {"muted":false}
+```
+
+---
+
+## The 3-minute cut (what the form wants)
+
+The submission caps the video at **3 minutes**. The five-minute version below is
+for presenting live. To fit three, keep these and cut the rest:
+
+| Keep | Time | Why |
+|---|---|---|
+| Act 1 interview, shortened to the two sentences | 0:00–0:30 | sets up the payoff |
+| Act 2, **narrated over the TrueForge screen** | 0:30–1:15 | your TrueForge + Bright Data answer |
+| Act 4a — the amend beat | 1:15–1:50 | the strongest single moment |
+| Act 4b — two refusals only ("yes go ahead", wrong SHA) | 1:50–2:15 | proves fail-closed |
+| Act 5 — named approval + merge | 2:15–2:45 | the payoff |
+| Act 6 close | 2:45–3:00 | the sentence they remember |
+
+Cut: Act 3 as a separate beat (fold its "four conditions" line into Act 2), the
+denial in 4b, and the audit-record close-up.
+
+---
+
 ## The one sentence
 
 > Security bots can already write patches. What they cannot do is decide when a
