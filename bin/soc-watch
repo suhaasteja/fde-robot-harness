@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -305,6 +306,14 @@ def speak(text: str) -> str:
         pass
     try:
         subprocess.run(["/usr/bin/say", text], check=False, timeout=60)
+        print(
+            "  !! SPOKE THROUGH THE MAC, not the robot — the conversation app is not "
+            "reachable on :7860.\n"
+            "     Anyone listening will think the robot said it. Start the app, or run "
+            "bin/demo check.",
+            file=sys.stderr,
+            flush=True,
+        )
         return "macos-fallback"
     except (OSError, subprocess.TimeoutExpired):
         return "silent"
