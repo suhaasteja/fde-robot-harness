@@ -189,3 +189,112 @@ approval does.
 - [ ] Team name, teammate names/emails
 - [ ] LinkedIn posts if going for that track
 - [ ] Confirm the repo is public
+
+---
+
+# Feedback questions
+
+## Which TrueForge feature was the most useful while building your project, and why?
+
+> **The native approval checkpoint.** Our entire product is "an agent must not
+> decide for itself that its own patch is safe to merge," and TrueForge already
+> had the primitive: the agent calls `ask_user_question`, the turn pauses with
+> `tool.response_required`, and it stays paused until a human answers. We didn't
+> have to build a parallel gate and hope the agent respected it — we made "did
+> TrueForge actually stop and ask?" one of four required conditions, then
+> delivered the human's spoken answer back into that pending checkpoint through
+> the sessions API. The safety property is enforced by the harness, not by our
+> prompt.
+>
+> Close second: MCP connectors made a physical robot a first-class tool. We
+> exposed the Reachy Mini as an MCP server, and any agent could control it
+> alongside Bright Data and GitHub with no robot-specific code in the agent.
+
+## Where did you get stuck while building with TrueForge, and what would you improve about the developer experience?
+
+> Three things, all of which cost us real time because they fail silently.
+>
+> **Deferred tool loading.** Our agent had a `say` tool and simply never called
+> it. We put the instruction in the system prompt, verified it was stored, and
+> still nothing. The cause is that agents see only tool *names* and must call
+> `get_tool_info` to expand one — so a tool the model doesn't bother expanding is
+> effectively invisible, and no amount of prompting fixes it. The fix is
+> `preload_tools`, which we found by reading the agent manifest rather than from
+> an error. Suggestion: surface this in the UI — mark preloaded vs deferred tools
+> per server, or warn when instructions reference a tool that is deferred.
+>
+> **Paused turns have no `state.output`.** A turn stopped at an approval
+> checkpoint reports `status: done`, but its report lives in the turn's messages.
+> We read `state.output`, got an empty string, and silently lost the entire
+> evidence chain from the very run requesting approval. Suggestion: either
+> populate `output` with the partial report, or state prominently in the docs that
+> a paused turn's content is in its messages. The docs note that "a done turn
+> carrying requiredActions is paused, not complete" — but the practical
+> consequence for reading output isn't spelled out.
+>
+> **Agent updates are by id, not name.** `PUT /api/v1/agents/robot-operator`
+> returns `Agent not found: robot-operator`, which reads as "the agent doesn't
+> exist" when it does. Suggestion: accept the name, or return a 400 saying to use
+> the id.
+>
+> Smaller: TrueForge binds IPv6-only, so a health check against
+> `127.0.0.1:8790` reports it down while it is serving fine on `[::1]`.
+
+## How useful was Qodo's code review feedback while building your project?
+
+**5**
+
+## What was the most useful or frustrating part of working with Qodo, and what would you change?
+
+> The most useful thing Qodo did was predict a bug we hadn't hit yet. Reviewing
+> our PR, it flagged that our two orchestration scripts each implemented Qodo
+> verification, checkpoint release, voice parsing and merge behaviour, and warned
+> this "creates divergence risk in the most security-sensitive path."
+>
+> A few hours later we hit exactly that. The two scripts disagreed about the
+> agent's expected output format, so two of our four gate conditions could never
+> pass and the approval gate could never open — silently, with no error anywhere.
+> Qodo had named the failure class before we experienced it. That is a materially
+> different kind of value from style feedback, and it changed what we are doing
+> next.
+>
+> Most frustrating: binding a review to a specific commit. Our merge gate requires
+> that Qodo reviewed the *current head SHA* — a stale review of an older commit
+> must not unlock a merge. But `gh pr view --json reviews` omits the reviewed
+> commit entirely, so we had to drop to
+> `gh api repos/{owner}/{repo}/pulls/{n}/reviews` to get `commit_id`. What I would
+> change: expose the reviewed SHA in the standard review object, and provide a
+> first-class "is this PR's current head reviewed and approved?" check. Every team
+> gating a merge on review freshness has to reimplement that.
+>
+> Minor: the notification flow is noisy — "New Review Started", "Qodo is busy
+> working" and "review superseded" arrived as separate emails for one review.
+
+## How easy was it to use Bright Data?
+
+**4**
+
+## What was the most useful or frustrating part of working with Bright Data, and what would you change?
+
+> Most useful: it made the vulnerability discovery genuinely live rather than
+> staged. Through the MCP connector our agent searched for recently disclosed CVEs
+> and fetched the authoritative advisories behind them — NVD, GitHub Security
+> Advisories, vendor pages — with zero scraping code on our side. In one run it
+> used Bright Data to establish that our pinned `next@15.2.3` was patched at
+> framework level but that our own middleware reintroduced the vulnerable pattern.
+> That distinction required reading the real advisory; it is not something a model
+> could assert safely from memory.
+>
+> Most frustrating: some sources will not fetch directly, and the agent has to
+> notice and route around it. We watched it announce, out loud, "Reuters would not
+> open directly, so I'm checking search headlines and CNBC" — good recovery, but
+> it burns turns and time, and on a broad query one run made 41 tool calls before
+> finishing.
+>
+> What I would change: the tool surface is large enough that our agent spent
+> several calls on `list_tools` and `get_tool_info` before its first real search. A
+> small number of high-level entry points — "search the web", "fetch this page as
+> markdown" — with the specialised tools behind them would cut latency noticeably
+> for agents that just need a fact. And a clearer signal distinguishing "this site
+> blocked us" from "no results" would let an agent fall back immediately instead
+> of retrying.
