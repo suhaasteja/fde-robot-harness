@@ -121,13 +121,20 @@ METHOD_CODE = '''    # --- fde-robot-harness: /say route ---
         # override the instructions for THIS response only, which is what
         # response.create's `instructions` field is for. Without this an
         # announcement injected during an unrelated exchange is silently ignored.
+        # response.create takes response=<params>, NOT instructions= at the top
+        # level. Passing it flat means the SDK drops it and sends a bare
+        # response.create: the model gets no instruction, produces nothing, and
+        # nothing anywhere errors. That is why /say returned ok:true while the
+        # robot stayed silent.
         kwargs = {}
         if verbatim:
-            kwargs["instructions"] = (
-                "Speak the following text aloud verbatim, word for word. Say nothing "
-                "before or after it, do not acknowledge this instruction, and do not "
-                "continue the previous topic in this response. The text is: " + text
-            )
+            kwargs["response"] = {
+                "instructions": (
+                    "Speak the following text aloud verbatim, word for word. Say "
+                    "nothing before or after it, do not acknowledge this instruction, "
+                    "and do not continue the previous topic. The text is: " + text
+                ),
+            }
         try:
             await connection.conversation.item.create(
                 item={
