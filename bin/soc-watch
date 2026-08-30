@@ -128,6 +128,24 @@ def sync_trueforge(state: dict, session_id: str) -> None:
             ).get("data", {})
             turn_state = detail.get("state", {})
             output = ((turn_state.get("output") or {}).get("content") or "")
+            if not output:
+                # A turn paused at an approval checkpoint is "done" but carries no
+                # final output -- the report lives in its messages. Without this the
+                # gate can never see the evidence of the very run that is asking for
+                # approval, so sandbox_tests stays false forever.
+                events = get_json(
+                    f"{TRUEFORGE}/api/v1/sessions/{session_id}/events"
+                ).get("data", [])
+                parts = []
+                for row in events:
+                    if row.get("turn_id") != turn_id:
+                        continue
+                    event = row.get("event") or {}
+                    if event.get("type") == "model.message":
+                        content = event.get("content")
+                        if isinstance(content, str):
+                            parts.append(content)
+                output = "\n".join(parts)
             # Promote only explicit, machine-readable facts from the completed
             # TrueForge report into the presentation model. If the report does
             # not contain the proof, the corresponding UI stage stays pending.
