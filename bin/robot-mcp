@@ -25,10 +25,17 @@ from __future__ import annotations
 
 import argparse
 import math
+import subprocess
 import sys
+import threading
 
 import httpx
-from mcp.server import MCPServer
+try:
+    # mcp >= 2
+    from mcp.server import MCPServer
+except ImportError:
+    # Reachy's bundled environment currently carries mcp 1.x.
+    from mcp.server.fastmcp import FastMCP as MCPServer
 
 DAEMON = "http://127.0.0.1:8000/api"
 TIMEOUT = 15.0
@@ -249,6 +256,35 @@ def set_volume(level: int) -> dict:
 APP_UI = "http://127.0.0.1:7860"
 
 
+def _system_say(text: str) -> dict:
+    """Speak through Reachy audio while an attention gesture remains active."""
+    stopped = threading.Event()
+
+    def animate() -> None:
+        # Recorded moves include coordinated head and antenna motion. Re-issue
+        # the gentle attentive move until speech ends so the body never freezes
+        # halfway through a long security briefing.
+        path = (
+            "/move/play/recorded-move-dataset/"
+            "pollen-robotics/reachy-mini-emotions-library/attentive2"
+        )
+        while not stopped.is_set():
+            _call("POST", path)
+            stopped.wait(7.0)
+
+    motion = threading.Thread(target=animate, name="reachy-speaking-motion", daemon=True)
+    motion.start()
+    try:
+        subprocess.run(["/usr/bin/say", text], timeout=30, check=True)
+        return {"ok": True, "spoken": text, "transport": "macos-voice"}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": "system_say_failed", "detail": str(error)[:300]}
+    finally:
+        stopped.set()
+        motion.join(timeout=2.0)
+        _call("POST", "/move/stop")
+
+
 @mcp.tool()
 def say(text: str, verbatim: bool = True) -> dict:
     """Make the robot say something out loud, in its own voice.
@@ -268,11 +304,18 @@ def say(text: str, verbatim: bool = True) -> dict:
         with httpx.Client(timeout=20.0) as c:
             r = c.post(f"{APP_UI}/say", json=body)
             if r.status_code == 404:
-                return {
-                    "error": "say_not_available",
-                    "detail": "The conversation app has no /say route. Run bin/patch-app "
-                    "and restart the app.",
-                }
+                # Conversation app 1.x exposes the same capability through its
+                # native JSON-RPC surface, so no site-package patch is needed.
+                rpc_text = text if not verbatim else (
+                    "Speak exactly this sentence and nothing else: " + text
+                )
+                r = c.post(
+                    f"{APP_UI}/rpc",
+                    json={"jsonrpc": "2.0", "id": "robot-mcp-say",
+                          "method": "conversation.say", "params": {"text": rpc_text}},
+                )
+                if r.status_code == 404:
+                    return _system_say(text)
             if r.status_code == 503:
                 return {
                     "error": "not_connected",
@@ -280,12 +323,12 @@ def say(text: str, verbatim: bool = True) -> dict:
                     "there is nothing to speak into.",
                 }
             r.raise_for_status()
-            return r.json()
+            result = r.json()
+            if result.get("error"):
+                return {"error": "say_failed", "detail": result["error"]}
+            return result.get("result", result)
     except httpx.ConnectError:
-        return {
-            "error": "app_unreachable",
-            "detail": "No conversation app on 127.0.0.1:7860. It must be running with --ui.",
-        }
+        return _system_say(text)
     except Exception as e:  # noqa: BLE001
         return {"error": type(e).__name__, "detail": str(e)[:300]}
 
@@ -318,8 +361,15 @@ def main() -> None:
 
     print(f"Reachy Mini MCP  ->  http://{args.host}:{args.port}/mcp", file=sys.stderr)
     print(f"  daemon: {DAEMON}", file=sys.stderr)
-    # mcp 2.0 takes host/port on the transport runner, not on .settings.
-    mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    try:
+        # mcp 2.0 takes host/port on the transport runner.
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    except TypeError:
+        # mcp 1.x (bundled with the currently installed Reachy environment)
+        # takes them through FastMCP settings instead.
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":
