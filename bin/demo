@@ -49,7 +49,7 @@ cmd_check() {
   # Probe with curl against `localhost`, not `nc` against the IPv4 literal:
   # TrueForge binds IPv6-only ([::1]:8790), so `nc -z 127.0.0.1 8790` reports it
   # down while it is serving perfectly.
-  for pair in "8000:daemon" "7860:conversation app" "8790:TrueForge" "7880:robot-mcp"; do
+  for pair in "8000:daemon" "7860:conversation app" "8790:TrueForge" "7880:robot-mcp" "7881:codebase-mcp"; do
     local port="${pair%%:*}" name="${pair##*:}"
     if curl -s -m 4 -o /dev/null "http://localhost:$port/" 2>/dev/null; then ok "$name (:$port)"
     else err "$name (:$port) DOWN"; bad=1; fi

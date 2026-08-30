@@ -9,7 +9,7 @@ cd ~/Desktop/fde-robot-harness
 
 ---
 
-## The five services
+## The services
 
 | # | Service | Port | Command | Needed for |
 |---|---|---|---|---|
@@ -17,7 +17,8 @@ cd ~/Desktop/fde-robot-harness
 | 2 | conversation app | 7860 | `~/reachy-conv/bin/reachy-mini-conversation-app --ui` | the robot's voice and ears |
 | 3 | robot-mcp | 7880 | `~/reachy-conv/bin/python bin/robot-mcp` | agents controlling the robot |
 | 4 | TrueForge | 8790 | `npx @truefoundry/trueforge@latest` | the agents |
-| 5 | control panel | 7870 | `bin/control-panel` | optional — transcript, volume |
+| 5 | codebase-mcp | 7881 | `~/reachy-conv/bin/python bin/codebase-mcp` | agents searching our code |
+| 6 | control panel | 7870 | `bin/control-panel` | optional — transcript, volume |
 
 Order matters for 1 and 2: the app checks for the daemon once at startup and will
 not notice one appearing later. **Always start the app from the repo root**, or it
@@ -65,7 +66,7 @@ security test *is* the vulnerability.
 bin/demo check
 ```
 
-All eight lines green. The two that matter most:
+All lines green. The two that matter most:
 
 - **robot serial device present** — if this warns, the daemon is in `--mockup-sim`
   and the robot will speak but never move.
@@ -147,6 +148,9 @@ cd ~/Desktop/fde-robot-harness
 
 # 3. robot-mcp
 ~/reachy-conv/bin/python bin/robot-mcp
+
+# 3b. codebase-mcp (searchable view of demo-fixture)
+~/reachy-conv/bin/python bin/codebase-mcp
 
 # 4. TrueForge
 npx @truefoundry/trueforge@latest

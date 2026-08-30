@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""
+codebase-mcp — expose a codebase to TrueForge agents as searchable tools.
+
+Until now the agent only ever saw a snapshot pasted into its prompt: capped in
+size, fixed at scan time, and impossible to follow a lead through. This lets it
+actually investigate — grep for a pattern, read the file that matched, check what
+imports it — the way a person would.
+
+    bin/codebase-mcp                       # serves ./demo-fixture on :7881
+    bin/codebase-mcp --root path/to/repo --port 7882
+
+Register in TrueForge, then attach to an agent:
+
+    curl -X POST http://localhost:8790/api/v1/settings/mcp-servers \
+      -H 'Content-Type: application/json' -d '{"manifest":{
+        "name":"codebase","type":"remote","url":"http://127.0.0.1:7881/mcp",
+        "description":"Search and read the codebase under review."}}'
+
+Strictly read-only. Every path is resolved and checked against the root, so a
+traversal like ../../.ssh/id_rsa is refused rather than served.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from mcp.server import MCPServer
+
+ROOT = Path(os.getenv("CODEBASE_ROOT", Path(__file__).resolve().parent.parent / "demo-fixture"))
+MAX_BYTES = 60_000
+MAX_MATCHES = 200
+
+# Never serve these, even from inside the root: a codebase under review is
+# exactly where a stray .env or key file is most damaging to hand to a model.
+DENY_NAMES = {".env", ".env.local", "id_rsa", "id_ed25519", ".npmrc", ".netrc"}
+DENY_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".crt"}
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next"}
+
+mcp = MCPServer(
+    "codebase",
+    instructions=(
+        "Read-only access to the codebase currently under security review. Use "
+        "search_code to find patterns, read_file to inspect what matched, and "
+        "list_files to orient yourself. Prefer searching over reading whole files: "
+        "these tools exist so you can follow a lead rather than reason from a "
+        "fixed snapshot. Secrets and dependency directories are excluded."
+    ),
+)
+
+
+def _safe(rel: str = "") -> Path | None:
+    """Resolve a path inside the root, or None if it escapes or is excluded."""
+    try:
+        target = (ROOT / rel).resolve() if rel else ROOT.resolve()
+        target.relative_to(ROOT.resolve())
+    except (ValueError, OSError):
+        return None
+    if target.name in DENY_NAMES or target.suffix in DENY_SUFFIXES:
+        return None
+    if any(part in SKIP_DIRS for part in target.parts):
+        return None
+    return target
+
+
+def _walk(base: Path):
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        if path.name in DENY_NAMES or path.suffix in DENY_SUFFIXES:
+            continue
+        yield path
+
+
+@mcp.tool()
+def list_files(subdirectory: str = "") -> dict:
+    """List the files in the codebase, optionally under one subdirectory.
+
+    Start here to orient yourself before searching. Dependency directories and
+    secret files are excluded.
+    """
+    base = _safe(subdirectory)
+    if base is None or not base.exists():
+        return {"error": "not_found", "detail": f"No such path in the codebase: {subdirectory!r}"}
+    files = [str(p.relative_to(ROOT)) for p in _walk(base)]
+    return {"root": ROOT.name, "count": len(files), "files": files[:500]}
+
+
+@mcp.tool()
+def search_code(pattern: str, subdirectory: str = "", case_sensitive: bool = False) -> dict:
+    """Search the codebase for a regular expression, returning matching lines.
+
+    Args:
+        pattern: a regular expression, e.g. "x-middleware-subrequest" or "req\\.headers".
+        subdirectory: optional path to narrow the search.
+        case_sensitive: default False.
+
+    Returns file, line number, and the matching line. Follow up with read_file to
+    see the surrounding code.
+    """
+    base = _safe(subdirectory)
+    if base is None or not base.exists():
+        return {"error": "not_found", "detail": f"No such path: {subdirectory!r}"}
+    try:
+        rx = re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
+    except re.error as e:
+        return {"error": "bad_pattern", "detail": str(e)}
+
+    hits = []
+    for path in _walk(base):
+        try:
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                if rx.search(line):
+                    hits.append({
+                        "file": str(path.relative_to(ROOT)),
+                        "line": n,
+                        "text": line.strip()[:200],
+                    })
+                    if len(hits) >= MAX_MATCHES:
+                        return {"pattern": pattern, "truncated": True, "matches": hits}
+        except OSError:
+            continue
+    return {"pattern": pattern, "count": len(hits), "matches": hits}
+
+
+@mcp.tool()
+def read_file(path: str, start_line: int = 1, end_line: int = 0) -> dict:
+    """Read one file from the codebase, optionally a line range.
+
+    Args:
+        path: repository-relative path, as returned by search_code or list_files.
+        start_line: 1-indexed, default 1.
+        end_line: inclusive; 0 means to the end of the file.
+    """
+    target = _safe(path)
+    if target is None or not target.is_file():
+        return {"error": "not_found", "detail": f"No such file in the codebase: {path!r}"}
+    try:
+        text = target.read_text(errors="replace")
+    except OSError as e:
+        return {"error": "unreadable", "detail": str(e)[:200]}
+    if len(text) > MAX_BYTES:
+        text = text[:MAX_BYTES] + "\n... [truncated]"
+    lines = text.splitlines()
+    lo = max(1, start_line)
+    hi = len(lines) if end_line <= 0 else min(len(lines), end_line)
+    return {
+        "file": str(target.relative_to(ROOT)),
+        "lines": f"{lo}-{hi} of {len(lines)}",
+        "content": "\n".join(lines[lo - 1 : hi]),
+    }
+
+
+@mcp.tool()
+def find_files(name_pattern: str) -> dict:
+    """Find files whose path matches a pattern, e.g. "test" or "\\.json$"."""
+    try:
+        rx = re.compile(name_pattern, re.IGNORECASE)
+    except re.error as e:
+        return {"error": "bad_pattern", "detail": str(e)}
+    files = [
+        str(p.relative_to(ROOT)) for p in _walk(ROOT.resolve()) if rx.search(str(p.relative_to(ROOT)))
+    ]
+    return {"pattern": name_pattern, "count": len(files), "files": files[:200]}
+
+
+@mcp.tool()
+def dependencies() -> dict:
+    """Read the dependency manifests — package.json, requirements.txt, and so on.
+
+    Use this to check installed versions against an advisory's affected range.
+    """
+    names = {
+        "package.json", "package-lock.json", "requirements.txt", "pyproject.toml",
+        "go.mod", "Cargo.toml",
+    }
+    out = {}
+    for path in _walk(ROOT.resolve()):
+        if path.name in names:
+            try:
+                out[str(path.relative_to(ROOT))] = path.read_text(errors="replace")[:8000]
+            except OSError:
+                continue
+    return {"manifests": out} if out else {"manifests": {}, "note": "no dependency manifests found"}
+
+
+def main() -> None:
+    global ROOT
+    ap = argparse.ArgumentParser(description="Serve a codebase to MCP clients")
+    ap.add_argument("--root", type=Path, default=ROOT)
+    ap.add_argument("--port", type=int, default=7881)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args()
+
+    ROOT = args.root.resolve()
+    if not ROOT.is_dir():
+        print(f"Not a directory: {ROOT}", file=sys.stderr)
+        raise SystemExit(1)
+
+    n = sum(1 for _ in _walk(ROOT))
+    print(f"Codebase MCP  ->  http://{args.host}:{args.port}/mcp", file=sys.stderr)
+    print(f"  serving {n} file(s) from {ROOT}", file=sys.stderr)
+    mcp.run(transport="streamable-http", host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()
