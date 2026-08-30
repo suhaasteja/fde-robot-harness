@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+#
+# demo — reset and drive the Physical SOC demo end to end.
+#
+#   bin/demo reset     restore the vulnerable fixture and clear run state
+#   bin/demo check     is every service up and is the robot real?
+#   bin/demo scan      run one CVE scan (robot narrates, ~4 min)
+#   bin/demo gate      poll the approval gate until it opens, then watch
+#   bin/demo status    one-line summary of where the incident is
+#
+# The fixture is one-shot: once the pipeline patches it, later scans correctly
+# return VERDICT: NONE. Always `reset` before a rehearsal.
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+VENV="${REACHY_VENV:-$HOME/reachy-conv}"
+PY="$VENV/bin/python"
+VULNERABLE_AT="909122f"   # commit holding the deliberately vulnerable fixture
+
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_yel" "$c_off" "$*"; }
+err()  { printf '%s✗%s %s\n' "$c_red" "$c_off" "$*" >&2; }
+dim()  { printf '%s%s%s\n' "$c_dim" "$*" "$c_off"; }
+
+session_id() {
+  "$PY" -c "import json;print(json.load(open('.run/cve-monitor.json')).get('session_id',''))" 2>/dev/null
+}
+incident_pr() {
+  "$PY" -c "
+import json
+inc=list((json.load(open('.run/cve-monitor.json')).get('incidents') or {}).values())
+print((inc[0].get('pr_url','') if inc else '').rsplit('/',1)[-1])" 2>/dev/null
+}
+
+cmd_reset() {
+  git show "$VULNERABLE_AT:demo-fixture/middleware.js" > demo-fixture/middleware.js || {
+    err "Could not restore the fixture from $VULNERABLE_AT"; exit 1; }
+  rm -f .run/cve-monitor.json .run/incident.json .run/reachy-approval.json
+  ok "fixture restored to vulnerable, run state cleared"
+  ( cd demo-fixture && node --test 2>&1 | grep -E "^# (pass|fail)" | sed 's/^/  /' )
+  dim "  (1 failing security test is correct — that is the vulnerability)"
+}
+
+cmd_check() {
+  local bad=0
+  # Probe with curl against `localhost`, not `nc` against the IPv4 literal:
+  # TrueForge binds IPv6-only ([::1]:8790), so `nc -z 127.0.0.1 8790` reports it
+  # down while it is serving perfectly.
+  for pair in "8000:daemon" "7860:conversation app" "8790:TrueForge" "7880:robot-mcp"; do
+    local port="${pair%%:*}" name="${pair##*:}"
+    if curl -s -m 4 -o /dev/null "http://localhost:$port/" 2>/dev/null; then ok "$name (:$port)"
+    else err "$name (:$port) DOWN"; bad=1; fi
+  done
+
+  # A simulated daemon speaks and reports fine but never moves. That difference
+  # is invisible until the robot is on camera, so surface it here.
+  if curl -s -m 4 "http://127.0.0.1:8000/api/state/present_head_pose" >/dev/null 2>&1; then
+    if ls /dev/cu.usbmodem* >/dev/null 2>&1; then ok "robot serial device present"
+    else warn "no serial device — daemon may be running --mockup-sim (no motion)"; fi
+  fi
+
+  # The single most common silent failure: /say missing means every announcement
+  # falls back to the laptop's voice while still reporting success.
+  if curl -s -m 4 "http://127.0.0.1:7860/openapi.json" 2>/dev/null | grep -q '"/say"'; then
+    ok "/say route present (robot voice)"
+  else
+    err "/say MISSING — announcements will come from the Mac. Run bin/patch-app, restart the app."
+    bad=1
+  fi
+
+  local muted; muted=$(curl -s -m 4 http://127.0.0.1:7860/mic 2>/dev/null)
+  case "$muted" in *true*) warn "microphone is MUTED — the robot cannot hear your approval";; *) ok "microphone live";; esac
+
+  [ "$bad" -eq 0 ] && ok "ready" || err "fix the above before demoing"
+}
+
+cmd_scan() {
+  dim "Scanning… the robot narrates as it works. Takes a few minutes."
+  "$PY" bin/cve-monitor --once
+  cmd_status
+}
+
+cmd_status() {
+  local sid pr
+  sid=$(session_id); pr=$(incident_pr)
+  [ -n "$sid" ] && dim "  session : http://localhost:8790/sessions/$sid"
+  [ -n "$pr" ]  && dim "  PR      : #$pr"
+  "$PY" - <<'EOF' 2>/dev/null || echo "  no run state yet — bin/demo scan"
+import json
+try: s=json.load(open('.run/incident.json'))
+except Exception: raise SystemExit(1)
+a=s.get('approval') or {}
+pre=a.get('prerequisites') or {}
+if pre:
+    for k,v in pre.items(): print(f"  {'PASS' if v else 'WAIT'}  {k}")
+print("  approval:", a.get('status'), "| merge:", (s.get('merge') or {}).get('status'))
+if a.get('last_words'): print("  heard  :", repr(a['last_words'])[:70])
+EOF
+}
+
+cmd_gate() {
+  local sid pr; sid=$(session_id); pr=$(incident_pr)
+  if [ -z "$sid" ] || [ -z "$pr" ]; then
+    err "No incident yet. Run: bin/demo scan"; exit 1
+  fi
+  dim "Polling the gate. Qodo takes a few minutes; approval stays locked until it lands."
+  dim "When it says waiting, say out loud: I approve commit <sha>"
+  "$PY" bin/soc-watch --session "$sid" --pr "$pr"
+}
+
+case "${1:-}" in
+  reset)  cmd_reset ;;
+  check)  cmd_check ;;
+  scan)   cmd_scan ;;
+  gate)   cmd_gate ;;
+  status) cmd_status ;;
+  *) sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
