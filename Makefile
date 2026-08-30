@@ -1,4 +1,4 @@
-.PHONY: start stop restart status doctor logs panel daemon daemon-stop help
+.PHONY: start stop restart status doctor logs panel daemon daemon-stop monitor help
 
 help:
 	@bin/reachy-app help
@@ -23,6 +23,9 @@ logs:
 
 panel:
 	@bin/reachy-app panel
+
+monitor:
+	@bin/cve-monitor --interval 60
 
 daemon:
 	@bin/reachy-app daemon

@@ -168,7 +168,7 @@ robot knowing what it is doing, and the mini model cannot deliver it.
 
 Verified on a two-subagent task: 13 tool calls produced exactly 3 spoken lines —
 "I'll check Hacker News and Lobste.rs now.", "I'm sending two researchers to check
-both sites in parallel.", "Hacker News has the more technical top story today." 
+both sites in parallel.", "Hacker News has the more technical top story today."
 
 Or by API — see the git log for `807e6d6`, which has the exact `curl` calls. Note
 `POST /api/v1/agents` takes `{name, manifest}`, and **updates are by `agent_id`,
