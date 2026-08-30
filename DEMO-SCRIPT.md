@@ -3,7 +3,7 @@
 For presenting to judges. [RUNBOOK.md](RUNBOOK.md) is the operational reference;
 this is what you *say* and *do*, in order.
 
-**Running time: 4 minutes live**, plus a pre-warm you start before they arrive.
+**Running time: 5 minutes live**, plus a pre-warm you start before they arrive.
 
 ---
 
@@ -39,7 +39,7 @@ hold attention.
 
 ---
 
-## Beat 1 — the hook (0:00–0:30)
+## Act 1 — the hook and the interview (0:00–1:00)
 
 **Do:** stand next to the robot. Nothing on screen yet.
 
@@ -50,25 +50,32 @@ hold attention.
 > notification among forty, and it either ships four days late or gets
 > rubber-stamped by someone who never read the diff.
 >
-> Approval has no weight. So we gave it weight."
+> Approval has no weight. So we gave it weight — and we started by having it
+> learn who it works for."
 
 **Do:** turn to the robot.
 
-**Say:** *"Is our code vulnerable right now?"*
+**Say:** *"Priya approves changes to our systems."*
 
-**Robot:** narrates that it is checking, then answers — CVE id, severity, one-line
-reason. Roughly:
+Wait for it to acknowledge. Then:
 
-> *"Yes — this code is vulnerable to CVE-2025-29927, critical, CVSS 9.1.
-> `authorize()` trusts an attacker-controlled header that can bypass middleware
-> authorization."*
+**Say:** *"Our most critical service is payment-service."*
 
-**Why this opens the demo:** it is live, it is fast, and it establishes the robot
-as a participant rather than a prop — before you ask them to care about a gate.
+**Pause between the two.** The model streams its tool arguments while you talk;
+saying both in one breath can truncate the call, and it will sound like it worked
+while saving nothing.
 
----
+**Do:** show `state/customer_profile.json` — or the panel — with the approver and
+critical service now in it.
 
-## Beat 2 — what already happened (0:30–1:30)
+**Say:**
+
+> "It just wrote that down. It'll matter in ninety seconds."
+
+**Why this opens:** it establishes the robot as a colleague being onboarded rather
+than a prop, and it sets up the payoff in Act 4 where it uses both facts.
+
+## Act 2 — what already happened (1:00–2:00)
 
 **Do:** show the TrueForge session (`bin/demo status` prints the URL). Expand
 *Agent steps*.
@@ -99,7 +106,7 @@ diagram, show the real thing.
 
 ---
 
-## Beat 3 — where it stops (1:30–2:00)
+## Act 3 — where it stops (2:00–2:30)
 
 **Do:** switch to the terminal running `bin/demo gate`.
 
@@ -120,9 +127,35 @@ diagram, show the real thing.
 
 ---
 
-## Beat 4 — the gate holds (2:00–2:45)
+## Act 4 — the gate holds, twice (2:30–3:45)
 
 This is the beat that wins technical judges. **Do not skip it.**
+
+### 4a — the commit changes after review
+
+**Do:** in a terminal, `bin/demo amend`. It pushes a trivial commit to the open
+remediation branch — after Qodo has already reviewed.
+
+**Wait ~10 seconds.** GitHub's API lags a push; the gate self-corrects on its next
+poll, but check too early and you will see the old SHA.
+
+**Robot:**
+
+> *"The commit changed after review. I won't ask for approval until Qodo has seen
+> this exact code."*
+
+**Do:** point at `qodo_followup` flipping to **false** and the gate returning to
+`locked`.
+
+**Say:**
+
+> "That's the attack this whole thing exists to stop: get a clean review, then
+> change the code. Nothing here is special-cased — the gate simply noticed that
+> the commit it was told about is no longer the commit that exists."
+
+Let Qodo re-review the new head, and it unlocks again.
+
+### 4b — the words have to be exact
 
 **Say to the robot:** *"Yes, go ahead."*
 
@@ -154,11 +187,21 @@ This is the beat that wins technical judges. **Do not skip it.**
 
 ---
 
-## Beat 5 — the approval (2:45–3:30)
+## Act 5 — the named approval (3:45–4:30)
 
 **Do:** let the room go quiet. This is the moment; do not talk over it.
 
-**Robot:** states the CVE, the severity, and asks for approval by commit.
+**Robot:** addresses the approver *by name*, and cites the service they flagged:
+
+> *"Priya, CVE-2025-29927 is verified. It can skip middleware authorization using
+> a forged internal header. It's in payment-service, which you flagged as
+> critical. Bright Data sourced the evidence. TrueForge confirmed applicability,
+> built the patch, and passed sandbox tests. Qodo reviewed exact commit 6d12418
+> for quality. Do you approve commit 6d12418?"*
+
+Both of those facts came from Act 1 — it is using what it was told, not a script.
+With no profile it falls back to generic wording; the gate is unaffected either
+way.
 
 **Say, clearly:**
 
@@ -181,7 +224,7 @@ by our code.
 
 ---
 
-## Beat 6 — close (3:30–4:00)
+## Act 6 — close (4:30–5:00)
 
 **Say:**
 
@@ -205,6 +248,9 @@ Live demos break. These are the realistic failures and what to say.
 | Scan finds nothing | "It already patched this one — that's the fixture being honest." | `bin/demo reset` |
 | Gate stuck on `qodo_followup` | "Qodo is still reviewing. It won't let us proceed until it's done — which is the point." | genuinely true; wait or cut to Beat 4 |
 | Approval not recognised | "It wants the exact commit." Repeat with the SHA. | this is correct behaviour, use it |
+| Robot doesn't remember the interview | "Let me tell it again." Say one fact, pause, say the next. | args truncate if you talk over the tool call |
+| Voice comes from the laptop | Don't point it out; keep going. | terminal shows a loud warning; app isn't running |
+| Gate still locked after amend | "GitHub hasn't caught up yet." Wait 10s. | API lags a push; it self-corrects |
 
 **The general move:** every failure in this system is a *fail-closed* failure. If
 something doesn't proceed, that is the thesis working. Say so and continue — do
@@ -232,6 +278,13 @@ The CVE discovery is live web via Bright Data. The patch is generated. The tests
 run in TrueForge's sandbox. The Qodo review is a real GitHub App. Nothing about
 the finding or the fix is pre-recorded — the fixture is a deliberately vulnerable
 file, and that is the only staged part.
+
+**"Is the CVE hardcoded?"**
+No. Discovery is live — different runs surface different CVEs, and it correctly
+reports VERDICT: NONE when nothing applies. What is hardcoded is a lookup of
+plain-English one-liners for three CVE ids, used only to phrase the spoken alert
+more naturally, with a generic fallback for anything else. The finding, severity,
+summary and affected service all come from the agent's own report.
 
 **"What would you do next?"**
 Consolidate the two orchestration scripts into one state machine. Qodo flagged
