@@ -56,9 +56,19 @@ bin/demo reset
 ```
 
 The fixture is one-shot. Once the pipeline patches it there is nothing left to
-find, and the next scan correctly returns `VERDICT: NONE`. Reset restores the
-vulnerable file and clears run state. Expect `# pass 1 / # fail 1` — the failing
-security test *is* the vulnerability.
+find, and the next scan correctly returns `VERDICT: NONE`.
+
+Reset replaces the whole `demo-fixture/` tree from `demo-fixture-baseline/` and
+clears run state. It restores every file and removes anything a run left behind —
+the agent can patch `lib/` or `routes/`, not just `middleware.js`. Expect
+`# pass 2 / # fail 1`; that failure *is* the vulnerability.
+
+The baseline is a directory rather than a git ref on purpose: merged remediation
+PRs mutate `main`, so restoring from a commit would eventually stop restoring the
+vulnerability.
+
+`bin/demo reset --hard` also clears the onboarding profile, so you can rehearse
+the interview act from scratch. Plain `reset` keeps it.
 
 ### 2. Preflight
 

@@ -3,6 +3,7 @@
 # demo — reset and drive the Physical SOC demo end to end.
 #
 #   bin/demo reset     restore the vulnerable fixture and clear run state
+#   bin/demo reset --hard   also forget the onboarding interview
 #   bin/demo check     is every service up and is the robot real?
 #   bin/demo scan      run one CVE scan (robot narrates, ~4 min)
 #   bin/demo gate      poll the approval gate until it opens, then watch
@@ -18,7 +19,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 VENV="${REACHY_VENV:-$HOME/reachy-conv}"
 PY="$VENV/bin/python"
-VULNERABLE_AT="909122f"   # commit holding the deliberately vulnerable fixture
+# The known-good vulnerable fixture lives as a directory, not a git ref: the
+# pipeline merges remediation PRs into main, so "restore from HEAD" would
+# eventually stop restoring the vulnerability. This is never patched.
+BASELINE="$ROOT/demo-fixture-baseline"
+FIXTURE="$ROOT/demo-fixture"
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
 ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
@@ -37,12 +42,36 @@ print((inc[0].get('pr_url','') if inc else '').rsplit('/',1)[-1])" 2>/dev/null
 }
 
 cmd_reset() {
-  git show "$VULNERABLE_AT:demo-fixture/middleware.js" > demo-fixture/middleware.js || {
-    err "Could not restore the fixture from $VULNERABLE_AT"; exit 1; }
-  rm -f .run/cve-monitor.json .run/incident.json .run/reachy-approval.json
-  ok "fixture restored to vulnerable, run state cleared"
-  ( cd demo-fixture && node --test 2>&1 | grep -E "^# (pass|fail)" | sed 's/^/  /' )
-  dim "  (1 failing security test is correct — that is the vulnerability)"
+  [ -d "$BASELINE" ] || { err "Missing baseline at $BASELINE"; exit 1; }
+
+  # Replace the whole tree, not one file. The fixture grew from 3 files to a
+  # nine-file service, and the agent can patch any of them -- restoring only
+  # middleware.js left whatever it changed in lib/ or routes/ in place.
+  rm -rf "$FIXTURE"
+  cp -R "$BASELINE" "$FIXTURE"
+  rm -f "$FIXTURE/README.md"
+
+  rm -f "$ROOT/.run/cve-monitor.json" "$ROOT/.run/incident.json" \
+        "$ROOT/.run/reachy-approval.json"
+
+  if [ "${1:-}" = "--hard" ]; then
+    rm -f "$ROOT/state/customer_profile.json"
+    ok "fixture restored, run state AND customer profile cleared"
+    dim "  you will need to re-run the onboarding interview"
+  else
+    ok "fixture restored to vulnerable, run state cleared"
+    local approver
+    approver=$("$PY" -c "
+import json,pathlib
+try: print(json.loads(pathlib.Path('$ROOT/state/customer_profile.json').read_text()).get('approver',''))
+except Exception: print('')" 2>/dev/null)
+    [ -n "$approver" ] && dim "  profile kept — approver: $approver (use --hard to clear)"
+  fi
+
+  local n; n=$(find "$FIXTURE" -type f | wc -l | tr -d ' ')
+  dim "  $n files restored"
+  ( cd "$FIXTURE" && node --test 2>&1 | grep -E "^# (pass|fail)" | sed 's/^/  /' )
+  dim "  (1 failing security test is correct — that failure IS the vulnerability)"
 }
 
 cmd_check() {
@@ -152,7 +181,7 @@ cmd_gate() {
 }
 
 case "${1:-}" in
-  reset)  cmd_reset ;;
+  reset)  shift; cmd_reset "$@" ;;
   check)  cmd_check ;;
   scan)   cmd_scan ;;
   gate)   cmd_gate ;;
