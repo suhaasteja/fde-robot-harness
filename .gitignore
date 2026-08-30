@@ -3,3 +3,4 @@ logs/
 .env
 __pycache__/
 *.pyc
+state/

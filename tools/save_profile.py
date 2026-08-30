@@ -71,26 +71,21 @@ class SaveProfile(Tool):
             "approver": {
                 "type": "string",
                 "description": (
-                    "The person who approves changes, as they said it — a first name "
-                    "is fine. This is who you will address by name when asking for "
-                    "approval later."
+                    "Who approves changes, as they said it — a first name is fine. "
+                    "This is who you will address by name when asking for approval."
                 ),
             },
-            "critical_services": {
-                "type": "array",
-                "items": {"type": "string"},
+            "critical_service": {
+                "type": "string",
                 "description": (
-                    "Services or repositories they called out as most important. Use "
-                    "their words, e.g. 'payment-service'."
+                    "One service or repository they called out as most important, in "
+                    "their words, e.g. 'payment-service'. Call this tool again for a "
+                    "second one rather than combining them."
                 ),
             },
-            "notes": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Anything else worth remembering — constraints, things to watch "
-                    "for, who else is involved. One short sentence each."
-                ),
+            "note": {
+                "type": "string",
+                "description": "One short thing worth remembering. One per call.",
             },
         },
         "required": [],
@@ -99,10 +94,16 @@ class SaveProfile(Tool):
     async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
         """Merge new facts into the stored profile."""
         approver = kwargs.get("approver")
-        services = kwargs.get("critical_services")
-        notes = kwargs.get("notes")
+        # Flat strings, not arrays. The realtime model streams tool arguments, and
+        # a long JSON object gets truncated mid-key when the speaker keeps talking
+        # -- which arrived here as every field empty and no clue why. One short
+        # value per call survives an interrupted stream; callers repeat the call.
+        service = kwargs.get("critical_service")
+        note = kwargs.get("note")
 
-        if not any((approver, services, notes)):
+        if not any(
+            isinstance(v, str) and v.strip() for v in (approver, service, note)
+        ):
             return {
                 "error": "nothing_to_save",
                 "spoken": "I didn't catch anything to remember there.",
@@ -113,21 +114,17 @@ class SaveProfile(Tool):
         if isinstance(approver, str) and approver.strip():
             profile["approver"] = approver.strip()[:80]
 
-        if isinstance(services, list):
-            # Merge rather than replace: a second conversation should add a
-            # service, not silently drop the one mentioned first.
+        if isinstance(service, str) and service.strip():
             existing = [s for s in profile.get("critical_services", []) if isinstance(s, str)]
-            for item in services:
-                if isinstance(item, str) and item.strip() and item.strip() not in existing:
-                    existing.append(item.strip()[:80])
+            if service.strip() not in existing:
+                existing.append(service.strip()[:80])
             profile["critical_services"] = existing[:20]
 
-        if isinstance(notes, list):
-            existing_notes = [n for n in profile.get("notes", []) if isinstance(n, str)]
-            for item in notes:
-                if isinstance(item, str) and item.strip() and item.strip() not in existing_notes:
-                    existing_notes.append(item.strip()[:200])
-            profile["notes"] = existing_notes[:20]
+        if isinstance(note, str) and note.strip():
+            notes = [n for n in profile.get("notes", []) if isinstance(n, str)]
+            if note.strip() not in notes:
+                notes.append(note.strip()[:200])
+            profile["notes"] = notes[:20]
 
         profile["interviewed_at"] = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
