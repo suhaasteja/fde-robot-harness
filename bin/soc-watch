@@ -149,15 +149,25 @@ def sync_trueforge(state: dict, session_id: str) -> None:
             # Promote only explicit, machine-readable facts from the completed
             # TrueForge report into the presentation model. If the report does
             # not contain the proof, the corresponding UI stage stays pending.
-            if "CVE-2025-29927" in output:
-                state.update({
-                    "cve": "CVE-2025-29927",
-                    "severity": "critical",
-                    "summary": "Authorization bypass via x-middleware-subrequest",
-                    "service": "Next.js middleware",
-                    "source": "Bright Data · NVD + Vercel advisory",
-                    "fetched_at": detail.get("created_at"),
-                })
+            # Derive the presentation fields from what the agent actually
+            # reported. These were previously a literal dict keyed on one CVE id,
+            # which meant the UI showed the same severity and summary no matter
+            # what was found -- and showed nothing at all for any other CVE.
+            verdict = re.search(r"VERDICT:\s*APPLICABLE\s+(CVE-\d{4}-\d+)", output, re.I)
+            if verdict:
+                found = {"cve": verdict.group(1).upper(), "fetched_at": detail.get("created_at")}
+                for label, key in (
+                    ("SEVERITY", "severity"),
+                    ("SUMMARY", "summary"),
+                    ("SERVICE", "service"),
+                    ("SOURCE", "source"),
+                ):
+                    match = re.search(rf"^{label}:\s*(.+)$", output, re.I | re.M)
+                    if match:
+                        found[key] = match.group(1).strip()[:200]
+                # A field the agent did not state stays absent rather than being
+                # invented, so the UI shows a gap instead of a confident guess.
+                state.update(found)
             before = re.search(
                 r"Before patch \|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|", output
             )
