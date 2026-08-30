@@ -286,6 +286,56 @@ def sync_qodo(state: dict, pr: str) -> None:
     }
 
 
+APP_SAY = "http://127.0.0.1:7860/say"
+
+
+def speak(text: str) -> str:
+    """Say something through the robot, falling back to the Mac only if it must."""
+    try:
+        request = urllib.request.Request(
+            APP_SAY,
+            data=json.dumps({"text": text, "verbatim": True}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.status == 200:
+                return "robot"
+    except OSError:
+        pass
+    try:
+        subprocess.run(["/usr/bin/say", text], check=False, timeout=60)
+        return "macos-fallback"
+    except (OSError, subprocess.TimeoutExpired):
+        return "silent"
+
+
+def announce_stale_review(state: dict) -> None:
+    """Say why the gate closed when the reviewed commit is no longer the head.
+
+    This is the one locked reason worth speaking: a human standing there has just
+    watched the gate go from open to shut, and the reason -- someone pushed after
+    the review -- is invisible from the outside. Spoken once per SHA, so a polling
+    loop does not repeat it.
+    """
+    qodo = state.get("qodo") or {}
+    if qodo.get("followup") is not False:
+        return
+    head = str(qodo.get("final_sha") or "")
+    reviewed = qodo.get("reviewed_sha")
+    # Only when a review exists but is bound to something other than this head:
+    # "never reviewed" is the ordinary waiting case and does not need narrating.
+    if not head or reviewed == head or not (qodo.get("reviews") or qodo.get("checks")):
+        return
+    if state.get("stale_review_announced") == head:
+        return
+    speak(
+        "The commit changed after review. I won't ask for approval "
+        "until Qodo has seen this exact code."
+    )
+    state["stale_review_announced"] = head
+
+
 def enforce_gate(state: dict) -> None:
     """Expose approval only when all machine-verifiable prerequisites agree."""
     tests_pass = (state.get("tests") or {}).get("status") == "passed"
@@ -413,6 +463,7 @@ def main() -> None:
         if args.pr:
             sync_qodo(state, args.pr)
         enforce_gate(state)
+        announce_stale_review(state)
         sync_voice_decision(state)
         if args.merge and (state.get("approval") or {}).get("status") == "approved":
             if not (state.get("approval") or {}).get("trueforge_released"):

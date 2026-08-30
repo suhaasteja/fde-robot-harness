@@ -6,6 +6,7 @@
 #   bin/demo check     is every service up and is the robot real?
 #   bin/demo scan      run one CVE scan (robot narrates, ~4 min)
 #   bin/demo gate      poll the approval gate until it opens, then watch
+#   bin/demo amend     push after review, so the gate re-locks (fail-closed proof)
 #   bin/demo status    one-line summary of where the incident is
 #
 # The fixture is one-shot: once the pipeline patches it, later scans correctly
@@ -101,6 +102,45 @@ if a.get('last_words'): print("  heard  :", repr(a['last_words'])[:70])
 EOF
 }
 
+cmd_amend() {
+  # Push a trivial commit to the open remediation branch AFTER Qodo has reviewed.
+  # The head SHA moves, Qodo's review is now bound to an older commit, and
+  # qodo_followup goes false through the REAL enforce_gate() -- nothing here is
+  # special-cased. This is the attack the gate exists to stop: get a clean
+  # review, then change the code.
+  local pr branch
+  pr=$(incident_pr)
+  [ -z "$pr" ] && { err "No incident yet. Run: bin/demo scan"; exit 1; }
+  branch=$(gh pr view "$pr" --json headRefName --jq .headRefName 2>/dev/null)
+  [ -z "$branch" ] && { err "Could not read the PR branch for #$pr"; exit 1; }
+
+  # Read the ref directly: `gh pr view --json headRefOid` serves a cached value
+  # and lags a push by long enough to look like the amend silently failed.
+  git fetch -q origin "$branch" 2>/dev/null
+  local before; before=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
+  dim "  branch      : $branch"
+  dim "  head before : ${before:0:7}"
+
+  local wt; wt=$(mktemp -d "$ROOT/.run/amend-XXXX")
+  git fetch -q origin "$branch" 2>/dev/null
+  if ! git worktree add -q --detach "$wt" "origin/$branch" 2>/dev/null; then
+    err "Could not check out $branch"; rm -rf "$wt"; exit 1
+  fi
+  {
+    printf '\n// touched after review — the gate must notice\n' >> "$wt/demo-fixture/middleware.js"
+    git -C "$wt" add demo-fixture/middleware.js
+    git -C "$wt" -c user.email=demo@local -c user.name="Physical SOC demo" \
+      commit -q -m "Touch after review (demo: prove the gate re-locks)"
+    git -C "$wt" push -q origin "HEAD:$branch"
+  } || { err "Amend failed"; git worktree remove --force "$wt" 2>/dev/null; exit 1; }
+  git worktree remove --force "$wt" 2>/dev/null
+
+  local after; after=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
+  ok "head moved: ${before:0:7} -> ${after:0:7}"
+  dim "  Qodo's review is now bound to the OLD commit."
+  dim "  Run bin/demo gate — qodo_followup should go false and the robot should say so."
+}
+
 cmd_gate() {
   local sid pr; sid=$(session_id); pr=$(incident_pr)
   if [ -z "$sid" ] || [ -z "$pr" ]; then
@@ -116,6 +156,7 @@ case "${1:-}" in
   check)  cmd_check ;;
   scan)   cmd_scan ;;
   gate)   cmd_gate ;;
+  amend)  cmd_amend ;;
   status) cmd_status ;;
   *) sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
