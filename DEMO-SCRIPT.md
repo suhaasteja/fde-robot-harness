@@ -244,6 +244,12 @@ Let Qodo re-review the new head, and it unlocks again.
 
 ---
 
+> ⛔ **Do not approve in the TrueForge UI.** It is the obvious thing to reach for
+> when the terminal looks slow, and it kills the demo: answering there consumes
+> the agent's pause, so `trueforge_checkpoint` flips to false and the gate locks
+> for good. The robot's voice is the only approval path — `soc-watch` relays what
+> you say into that pending checkpoint. Recovering means a fresh `bin/demo scan`.
+
 ## Act 5 — the named approval (3:45–4:30)
 
 **Do:** let the room go quiet. This is the moment; do not talk over it.
