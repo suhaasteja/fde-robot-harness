@@ -3,3 +3,5 @@ export function authorize(request) {
   // authorization decisions; rely only on the authenticated session role.
   return { allowed: request.session?.role === "admin" };
 }
+
+// touched after review — the gate must notice
