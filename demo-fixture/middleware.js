@@ -1,6 +1,5 @@
 export function authorize(request) {
-  // Deliberately vulnerable demo fixture for CVE-2025-29927: trusting this
-  // attacker-controlled header can bypass middleware authorization.
-  if (request.headers["x-middleware-subrequest"]) return { allowed: true };
+  // External clients can set x-middleware-subrequest, so never trust it for
+  // authorization decisions; rely only on the authenticated session role.
   return { allowed: request.session?.role === "admin" };
 }
